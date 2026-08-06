@@ -5,13 +5,15 @@
 =====================================
 
 运行:
-  python3 cli.py [棋盘大小] [--ai]
+  python3 cli.py [棋盘大小] [--ai [黑|白]]
     棋盘大小 = 每边方格数(默认 10, 可选 2~30), 格点数为 大小+1
-    --ai      = 人机模式: 人类执黑先手, AI 执白
+    --ai        = 人机模式: 人类执黑先手, AI 执白
+    --ai white  = 人机模式: 人类执白(后手), AI 执黑先走
 
 操作方式:
   "x y"        在格点 (x, y) 落子, 如 "5 5"(坐标范围 0~大小, 支持 "5,5")
   a            切换 人机模式 / 双人模式
+  a b / a w    人机模式, 并选择人类执黑(先手) / 执白(后手)
   u / undo     悔棋
   n / new      新局(保持当前棋盘大小);  n 13 表示以 13×13 开新局
   h / help     显示帮助
@@ -31,11 +33,20 @@ MAX_SIZE = 30
 
 
 def parse_args(argv):
-    """解析命令行参数: (棋盘大小, 是否人机模式)。非法返回 None。"""
-    size, ai_mode = DEFAULT_SIZE, False
-    for a in argv:
+    """解析命令行参数: (棋盘大小, 是否人机, 人类执子颜色)。非法返回 None。"""
+    size, ai_mode, human_color = DEFAULT_SIZE, False, BLACK
+    i = 0
+    while i < len(argv):
+        a = argv[i]
         if a == '--ai':
-            ai_mode = True
+            ai_mode, human_color = True, BLACK
+            if i + 1 < len(argv) and argv[i + 1] in ('black', 'white', '黑', '白'):
+                i += 1
+                human_color = WHITE if argv[i] in ('white', '白') else BLACK
+        elif a in ('--ai=white', '--ai-w', '--aiw'):
+            ai_mode, human_color = True, WHITE
+        elif a in ('--ai=black', '--ai-b', '--aib'):
+            ai_mode, human_color = True, BLACK
         elif a.lstrip('-').isdigit():
             s = int(a)
             if not MIN_SIZE <= s <= MAX_SIZE:
@@ -44,9 +55,10 @@ def parse_args(argv):
             size = s
         else:
             print(f'无法识别的参数: {a}')
-            print('用法: python3 cli.py [棋盘大小] [--ai]')
+            print('用法: python3 cli.py [棋盘大小] [--ai [黑|白]]')
             return None
-    return size, ai_mode
+        i += 1
+    return size, ai_mode, human_color
 
 
 def render(game):
@@ -64,14 +76,35 @@ def main(argv):
     parsed = parse_args(argv)
     if parsed is None:
         return
-    size, ai_mode = parsed
+    size, ai_mode, human_color = parsed
+    ai_color = WHITE if human_color == BLACK else BLACK
     game = JordanChess(size=size)
     ai = None
+
+    def ai_think():
+        """AI 走一步(若轮到 AI)。"""
+        nonlocal ai
+        if game.winner is not None or game.turn != ai_color:
+            return
+        if ai is None or ai.game is not game:
+            ai = JordanAI(game, ai_color, seed=1)
+        print('AI 思考中…')
+        mv = ai.choose_move()
+        r = game.place(*mv)
+        print(f'AI 落子: {mv}')
+        if r['loops']:
+            print(f'★ AI 形成闭环 {len(r["loops"])} 个 —— 立即获胜!')
+
+    def new_game(new_size):
+        nonlocal game, ai
+        game = JordanChess(size=new_size)
+        ai = None
+
     print('=' * 56)
     print('约当棋 (Jordan Chess) —— 基于约当曲线定理的双人零和棋')
     print(f'棋盘 {game.size}×{game.size} 方格 → {game.n}×{game.n} 格点; '
           '黑方先手, 形成任何闭环即获胜')
-    print('输入 "x y" 落子; a 人机/双人; u 悔棋; '
+    print('输入 "x y" 落子; a 人机/双人; a b/a w 执黑/执白; u 悔棋; '
           'n 新局(n 13 = 13×13); h 帮助; q 退出')
     print('=' * 56)
     while True:
@@ -89,20 +122,15 @@ def main(argv):
             if game.last_loops:
                 turn_txt += f'   上一步新形成闭环 {len(game.last_loops)} 个'
             if ai_mode:
-                turn_txt += '   [人机: 你执黑, AI 执白]'
+                turn_txt += f'   [人机: 你执{COLOR_NAME[human_color]}, ' \
+                            f'AI 执{COLOR_NAME[ai_color]}]'
             print(turn_txt)
 
         # AI 轮次自动走子
-        if ai_mode and game.winner is None and game.turn == WHITE:
-            if ai is None or ai.game is not game:
-                ai = JordanAI(game, WHITE, seed=1)
-            print('AI 思考中…')
-            mv = ai.choose_move()
-            r = game.place(*mv)
-            print(f'AI 落子: {mv}')
-            if r['loops']:
-                print(f'★ AI 形成闭环 {len(r["loops"])} 个 —— 立即获胜!')
-            continue
+        if ai_mode:
+            ai_think()
+            if game.winner is not None:
+                continue
 
         try:
             cmd = input('> ').strip().lower()
@@ -114,8 +142,18 @@ def main(argv):
             return
         if cmd in ('a', 'ai'):
             ai_mode = not ai_mode
-            print('已切换为 人机模式(你执黑, AI 执白)。'
-                  if ai_mode else '已切换为 双人模式。')
+            print('已切换为 人机模式。' if ai_mode else '已切换为 双人模式。')
+            if ai_mode:
+                ai_think()
+            continue
+        if cmd in ('a b', 'a w', 'ab', 'aw', 'a 黑', 'a 白'):
+            human_color = WHITE if cmd.split()[1] in ('w', '白') else BLACK
+            ai_color = WHITE if human_color == BLACK else BLACK
+            ai_mode = True
+            new_game(game.size)
+            print(f'人机模式: 你执{COLOR_NAME[human_color]}, '
+                  f'AI 执{COLOR_NAME[ai_color]}。')
+            ai_think()
             continue
         if cmd in ('u', 'undo'):
             if game.undo():
@@ -124,8 +162,10 @@ def main(argv):
                 print('没有可撤销的步骤。')
             continue
         if cmd in ('n', 'new'):
-            game = JordanChess(size=game.size)
+            new_game(game.size)
             print(f'新局开始({game.size}×{game.size}), 黑方先手。')
+            if ai_mode:
+                ai_think()
             continue
         if cmd.startswith('n ') or cmd.startswith('new '):
             try:
@@ -136,12 +176,14 @@ def main(argv):
             if not MIN_SIZE <= s <= MAX_SIZE:
                 print(f'棋盘大小需在 {MIN_SIZE}~{MAX_SIZE} 之间')
                 continue
-            game = JordanChess(size=s)
+            new_game(s)
             print(f'新局开始({game.size}×{game.size}), 黑方先手。')
+            if ai_mode:
+                ai_think()
             continue
         if cmd in ('h', 'help'):
-            print('输入 "x y" 落子(如 "5 5"); a 人机/双人; u 悔棋; '
-                  'n 新局(保持大小); n 13 新局(13×13); q 退出')
+            print('输入 "x y" 落子(如 "5 5"); a 人机/双人; a b/a w 执黑/执白; '
+                  'u 悔棋; n 新局(保持大小); n 13 新局(13×13); q 退出')
             continue
         parts = cmd.replace(',', ' ').split()
         if len(parts) == 2 and all(p.lstrip('-').isdigit() for p in parts):

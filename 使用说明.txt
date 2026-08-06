@@ -9,19 +9,23 @@
   游戏规则：
   · 黑先白后，轮流在交叉点上放一枚棋子
   · 谁先用自己的棋子围成一个"闭环"（约当曲线），谁就赢
-  · 想和电脑对战，点页面上的「人机」按钮（你执黑先手）
+  · 想和电脑对战，点页面上的「人机」按钮
+  · 点「执黑 / 执白」选择你拿黑棋（先手）还是白棋（后手）
   · 棋盘大小可在顶部修改（2~30），点「新局」生效
 
 【命令行版】（需要电脑上装有 Python 3）
-  python3 cli.py           双人对战
-  python3 cli.py --ai      人机对战（你执黑，AI 执白）
-  python3 cli.py 13 --ai   13×13 棋盘的人机对战
+  python3 cli.py             双人对战
+  python3 cli.py --ai        人机对战（默认你执黑先手）
+  python3 cli.py --ai white  人机对战（你执白后手，AI 执黑先走）
+  python3 cli.py 13 --ai     13×13 棋盘的人机对战
+  对局中可输入 a 切人机/双人，a b / a w 切换执黑/执白
 
 【图形界面版】（需要 Python 3 + pygame）
   pip install pygame
-  python3 gui.py           双人对战
-  python3 gui.py --ai      人机对战
-  窗口底部 [◀][▶] 调棋盘大小，[AI] 切换人机模式
+  python3 gui.py             双人对战
+  python3 gui.py --ai        人机对战
+  窗口底部 [◀][▶] 调棋盘大小，[AI] 人机模式，
+  [You:Black/You:White] 切换你执黑还是执白
 
 【玩法小技巧】
   · 最短 4 手（一个 2×2 小方格）就能获胜——小心对手抢先

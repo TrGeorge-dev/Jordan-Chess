@@ -43,13 +43,14 @@ jordan-chess/
 **启动方式**
 ```bash
 # 命令行: 人类执黑先手, AI 执白
-python3 cli.py --ai          # 10×10
+python3 cli.py --ai             # 10×10, 默认你执黑
+python3 cli.py --ai white      # 你执白(后手), AI 执黑先走
 python3 cli.py 13 --ai       # 13×13; 局内按 a 可切换 人机/双人
 
 # pygame 版: 底部 [AI:OFF] 按钮切换人机模式
 python3 gui.py --ai          # 或运行时点按钮
 
-# 浏览器版: 点「人机」按钮, 你执黑先手
+# 浏览器版: 点「人机」+「执黑/执白」选边
 ```
 
 **AI 算法**（ai.py，JS 版同算法移植进 index.html）

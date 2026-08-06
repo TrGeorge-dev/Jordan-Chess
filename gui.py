@@ -52,7 +52,8 @@ class GameUI:
         pygame.init()
         self.game = game or JordanChess()
         self.size = self.game.size
-        self.ai_mode = False       # 人机模式: 人类执黑, AI 执白
+        self.ai_mode = False       # 人机模式
+        self.human_color = BLACK   # 人类执子颜色(默认黑先手)
         self.ai = None
         self.ai_busy = False
         self.screen = pygame.display.set_mode((W, H))
@@ -64,6 +65,10 @@ class GameUI:
         pygame.display.set_caption(
             f'约当棋 Jordan Chess ({self.size}×{self.size})')
 
+    @property
+    def ai_color(self):
+        return WHITE if self.human_color == BLACK else BLACK
+
     # ---- 布局(棋盘随大小缩放, 居中) ----
     def _layout(self):
         self.cell = min(64.0, AREA / self.size)
@@ -71,18 +76,23 @@ class GameUI:
         self.ox = (W - self.grid) // 2
         self.oy = MARGIN + STATUS_H
         cy = H - BTN_H + 12
-        sx = W // 2 - 264
+        sx = W // 2 - 300
         self.size_minus_rect = pygame.Rect(sx, cy, 44, 40)
-        self.size_text_rect = pygame.Rect(sx + 52, cy, 120, 40)
-        self.size_plus_rect = pygame.Rect(sx + 180, cy, 44, 40)
-        self.undo_rect = pygame.Rect(sx + 232, cy, 100, 40)
-        self.new_rect = pygame.Rect(sx + 340, cy, 100, 40)
-        self.ai_rect = pygame.Rect(sx + 448, cy, 80, 40)
+        self.size_text_rect = pygame.Rect(sx + 52, cy, 110, 40)
+        self.size_plus_rect = pygame.Rect(sx + 170, cy, 44, 40)
+        self.undo_rect = pygame.Rect(sx + 222, cy, 92, 40)
+        self.new_rect = pygame.Rect(sx + 322, cy, 92, 40)
+        self.ai_rect = pygame.Rect(sx + 422, cy, 76, 40)
+        self.side_rect = pygame.Rect(sx + 506, cy, 94, 40)
 
     def _ensure_ai(self):
         if self.ai is None or self.ai.game is not self.game:
-            self.ai = JordanAI(self.game, WHITE, seed=1)
+            self.ai = JordanAI(self.game, self.ai_color, seed=1)
         return self.ai
+
+    def _new_game(self):
+        self.game = JordanChess(size=self.size)
+        self.ai = None
 
     def set_size(self, new_size):
         """更换棋盘大小并自动开新局。"""
@@ -90,8 +100,7 @@ class GameUI:
         if new_size == self.size:
             return
         self.size = new_size
-        self.game = JordanChess(size=new_size)
-        self.ai = None
+        self._new_game()
         self._layout()
         self.msg = f'新局: {new_size}×{new_size} 棋盘'
         pygame.display.set_caption(
@@ -130,6 +139,15 @@ class GameUI:
                 self.msg = ('人机模式: 你执黑, AI 执白。'
                             if self.ai_mode else '双人模式。')
                 return
+            if self.side_rect.collidepoint(ev.pos):
+                if not self.ai_mode:
+                    self.msg = '请先开启人机模式(AI 按钮), 再选择执子颜色。'
+                    return
+                self.human_color = WHITE if self.human_color == BLACK else BLACK
+                self._new_game()
+                self.msg = f'你执{("黑" if self.human_color == BLACK else "白")}, ' \
+                           f'AI 执{("白" if self.human_color == BLACK else "黑")}。'
+                return
             if self.undo_rect.collidepoint(ev.pos):
                 if self.game.undo():
                     self.msg = '悔棋成功。'
@@ -137,8 +155,7 @@ class GameUI:
                     self.msg = '没有可撤销的步骤。'
                 return
             if self.new_rect.collidepoint(ev.pos):
-                self.game = JordanChess(size=self.size)
-                self.ai = None
+                self._new_game()
                 self.msg = f'新局开始, 黑方先手({self.size}×{self.size})。'
                 return
             p = self.screen_to_lattice(*ev.pos)
@@ -155,9 +172,9 @@ class GameUI:
         return None
 
     def ai_move(self):
-        """人机模式下 AI 走一步(执白)。"""
+        """人机模式下 AI 走一步。"""
         if not self.ai_mode or self.game.winner is not None \
-                or self.game.turn != WHITE:
+                or self.game.turn != self.ai_color:
             return
         self.ai_busy = True
         self.msg = 'AI 思考中…'
@@ -236,22 +253,26 @@ class GameUI:
         # 底部按钮
         for rect in (self.size_minus_rect, self.size_text_rect,
                      self.size_plus_rect, self.undo_rect, self.new_rect,
-                     self.ai_rect):
+                     self.ai_rect, self.side_rect):
             pygame.draw.rect(surf, BTN_BG, rect, border_radius=8)
             pygame.draw.rect(surf, OUTLINE, rect, 1, border_radius=8)
         surf.blit(self.font.render('◀', True, TEXT),
                   (self.size_minus_rect.x + 14, self.size_minus_rect.y + 7))
         surf.blit(self.font.render(f'Size {self.size}', True, TEXT),
-                  (self.size_text_rect.x + 18, self.size_text_rect.y + 8))
+                  (self.size_text_rect.x + 14, self.size_text_rect.y + 8))
         surf.blit(self.font.render('▶', True, TEXT),
                   (self.size_plus_rect.x + 14, self.size_plus_rect.y + 7))
         surf.blit(self.font.render('Undo', True, TEXT),
-                  (self.undo_rect.x + 24, self.undo_rect.y + 8))
+                  (self.undo_rect.x + 20, self.undo_rect.y + 8))
         surf.blit(self.font.render('New', True, TEXT),
-                  (self.new_rect.x + 30, self.new_rect.y + 8))
+                  (self.new_rect.x + 26, self.new_rect.y + 8))
         ai_txt = 'AI:ON' if self.ai_mode else 'AI:OFF'
         surf.blit(self.font.render(ai_txt, True, TEXT),
-                  (self.ai_rect.x + 14, self.ai_rect.y + 8))
+                  (self.ai_rect.x + 12, self.ai_rect.y + 8))
+        side_txt = ('You:Black' if self.human_color == BLACK
+                    else 'You:White')
+        surf.blit(self.font.render(side_txt, True, TEXT),
+                  (self.side_rect.x + 8, self.side_rect.y + 8))
 
         if surface is None:
             pygame.display.flip()
@@ -283,7 +304,7 @@ def main(argv):
             if ui.handle_event(ev) == 'quit':
                 running = False
         if ui.ai_mode and not ui.ai_busy \
-                and ui.game.winner is None and ui.game.turn == WHITE:
+                and ui.game.winner is None and ui.game.turn == ui.ai_color:
             ui.ai_move()
         ui.draw()
         clock.tick(60)

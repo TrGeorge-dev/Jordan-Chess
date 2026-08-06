@@ -61,6 +61,7 @@
   <button id="new">新局</button>
   <button id="undo">悔棋</button>
   <button id="ai" class="aibtn">人机</button>
+  <button id="side" class="aibtn" style="display:none">执黑</button>
 </div>
 <details>
   <summary>规则（约当曲线定理）</summary>
@@ -496,6 +497,7 @@ function startNewGame() {
   statusEl.textContent = `新局开始：黑方先手（${boardSize}×${boardSize} 方格）`;
   statusEl.classList.add("info");
   draw();
+  if (aiMode && game.winner === null && game.turn === aiColor()) aiMove();
 }
 function applySizeFromInput() {
   const v = parseInt(sizeInput.value, 10);
@@ -568,7 +570,7 @@ function draw() {
 
 canvas.addEventListener("click", (ev) => {
   if (game.winner !== null) return;
-  if (aiMode && game.turn === WHITE) return;   // AI 轮次, 忽略人手
+  if (aiMode && game.turn !== humanColor) return;   // AI 轮次, 忽略人手
   const rect = canvas.getBoundingClientRect();
   const sx = (ev.clientX - rect.left) * (SIZE / rect.width);
   const sy = (ev.clientY - rect.top) * (SIZE / rect.height);
@@ -591,7 +593,7 @@ canvas.addEventListener("click", (ev) => {
     setTimeout(draw, 400);   // 稍后展示胜利横幅
   }
   draw();
-  if (aiMode && game.winner === null && game.turn === WHITE) aiMove();
+  if (aiMode && game.winner === null && game.turn === aiColor()) aiMove();
 });
 
 document.getElementById("undo").addEventListener("click", () => {
@@ -599,20 +601,28 @@ document.getElementById("undo").addEventListener("click", () => {
   else statusEl.textContent = "没有可撤销的步骤。";
   statusEl.classList.add("info");
   draw();
+  if (aiMode && game.winner === null && game.turn === aiColor()) aiMove();
 });
 document.getElementById("new").addEventListener("click", applySizeFromInput);
 sizeInput.addEventListener("change", applySizeFromInput);
 
-// ---- 人机模式: 人类执黑, AI 执白 ----
+// ---- 人机模式: 人类可选执黑(先手)或执白(后手) ----
 let aiMode = false;
+let humanColor = BLACK;
 let ai = null;
 const aiBtn = document.getElementById("ai");
+const sideBtn = document.getElementById("side");
+function aiColor() { return humanColor === BLACK ? WHITE : BLACK; }
 function ensureAI() {
-  if (!ai || ai.game !== game) ai = new JordanAI(game, WHITE, 2.0, 5);
+  if (!ai || ai.game !== game) ai = new JordanAI(game, aiColor(), 2.0, 5);
   return ai;
 }
+function updateSideBtn() {
+  sideBtn.textContent = humanColor === BLACK ? "执黑" : "执白";
+  sideBtn.style.display = aiMode ? "" : "none";
+}
 function aiMove() {
-  if (!aiMode || game.winner !== null || game.turn !== WHITE) return;
+  if (!aiMode || game.winner !== null || game.turn !== aiColor()) return;
   statusEl.textContent = "AI 思考中…";
   statusEl.classList.add("info");
   draw();
@@ -632,14 +642,24 @@ function aiMove() {
 aiBtn.addEventListener("click", () => {
   aiMode = !aiMode;
   aiBtn.classList.toggle("on", aiMode);
+  updateSideBtn();
   if (aiMode) {
-    statusEl.textContent = "人机模式：你执黑（先手），AI 执白。";
+    statusEl.textContent = "人机模式：点「执黑/执白」选边。";
   } else {
     statusEl.textContent = "双人模式。";
   }
   statusEl.classList.add("info");
   draw();
-  if (aiMode && game.winner === null && game.turn === WHITE) aiMove();
+  if (aiMode && game.winner === null && game.turn === aiColor()) aiMove();
+});
+sideBtn.addEventListener("click", () => {
+  humanColor = (humanColor === BLACK) ? WHITE : BLACK;
+  updateSideBtn();
+  startNewGame();   // 换边需重开
+  statusEl.textContent = humanColor === BLACK
+    ? "你执黑（先手），AI 执白。"
+    : "你执白（后手），AI 执黑先走。";
+  statusEl.classList.add("info");
 });
 
 startNewGame();   // 首次开局(默认 10×10)
