@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>约当棋 Jordan Chess</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
+    background: #f2f2ed; color: #2a2a2a;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 16px 8px 40px;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; letter-spacing: 2px; }
+  .sub { font-size: 13px; color: #888; margin-bottom: 12px; }
+  #status {
+    font-size: 17px; font-weight: 600; min-height: 26px; margin-bottom: 6px;
+    text-align: center;
+  }
+  #status.win { color: #d32f2f; }
+  #status.info { color: #a06010; }
+  #board { background: #fbfaf6; border: 1px solid #ccc; border-radius: 8px;
+           touch-action: manipulation; max-width: 100%; }
+  .buttons { display: flex; gap: 12px; margin: 12px 0; align-items: center; }
+  .buttons button {
+    font-size: 16px; padding: 8px 26px; border-radius: 8px; border: 1px solid #bbb;
+    background: #e8e8e2; cursor: pointer;
+  }
+  .buttons button:active { background: #cfd6e6; }
+  .sizelabel { font-size: 15px; display: flex; align-items: center; gap: 6px; }
+  #size {
+    width: 64px; font-size: 16px; padding: 6px 8px; border-radius: 8px;
+    border: 1px solid #bbb; text-align: center;
+  }
+  #ai.on { background: #cfd6e6; border-color: #7a93c4; }
+  details {
+    width: min(660px, 94vw); margin-top: 10px; font-size: 13px; line-height: 1.7;
+    background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 8px 14px;
+  }
+  details summary { cursor: pointer; font-weight: 600; }
+  details table { border-collapse: collapse; width: 100%; margin: 6px 0; }
+  details td { border: 1px solid #eee; padding: 3px 8px; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: #666; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<h1>约当棋</h1>
+<div class="sub">Jordan Chess · 基于约当曲线定理的双人零和棋</div>
+<div class="legend">
+  <span>● 黑方</span><span>○ 白方</span>
+  <span><span style="color:#d32f2f">▽</span> 闭环</span>
+  <span><span style="color:#e0b020">◎</span> 最后一步</span>
+</div>
+<div id="status">轮到：黑方</div>
+<canvas id="board"></canvas>
+<div class="buttons">
+  <label class="sizelabel">棋盘
+    <input id="size" type="number" min="2" max="30" step="1" value="10">
+  </label>
+  <button id="new">新局</button>
+  <button id="undo">悔棋</button>
+  <button id="ai" class="aibtn">人机</button>
+</div>
+<details>
+  <summary>规则（约当曲线定理）</summary>
+  <p>N×N 方格 → (N+1)×(N+1) 格点（默认 10×10，可在上方自定义 2~30）。黑先白后，轮流在空白格点放一枚己方棋子。同色棋子上下左右相邻视为连通（斜向不连通）。落子使己方棋子形成任意<strong>不自交闭合路径</strong>（约当曲线）即立即获胜——无论环内有无对方棋子。若棋盘下满且从未成环则为平局；棋子不可移动。点「人机」可与 AI 对战（你执黑先手）。</p>
+</details>
+
+<script>
+"use strict";
+const EMPTY = 0, BLACK = 1, WHITE = 2;
+const CNAME = {0: "", 1: "黑方", 2: "白方"};
+
+// ================= 引擎（与 Python 版同算法） =================
+class JordanChess {
+  constructor(size = 10) {
+    this.size = size;
+    this.n = size + 1;
+    this.board = Array.from({length: this.n}, () => Array(this.n).fill(EMPTY));
+    this.turn = BLACK;
+    this.winner = null;              // null / BLACK / WHITE / 'DRAW'
+    this.history = [];
+    this.lastMove = null;
+    this.lastLoops = [];
+  }
+  get(x, y) { return this.board[x][y]; }
+  isInside(x, y) { return x >= 0 && x < this.n && y >= 0 && y < this.n; }
+  isFull() { return this.board.every(r => r.every(c => c !== EMPTY)); }
+  moves() {
+    const out = [];
+    for (let x = 0; x < this.n; x++)
+      for (let y = 0; y < this.n; y++)
+        if (this.board[x][y] === EMPTY) out.push([x, y]);
+    return out;
+  }
+  place(x, y) {
+    if (!this.isInside(x, y)) return {ok:false, reason:`坐标越界: (${x},${y})`};
+    if (this.board[x][y] !== EMPTY) return {ok:false, reason:`格点 (${x},${y}) 已有棋子`};
+    if (this.winner !== null) return {ok:false, reason:"游戏已结束"};
+    const color = this.turn;
+    this.board[x][y] = color;
+    const loops = this._findNewCycles(x, y, color);
+    if (loops.length > 0) this.winner = color;      // 闭环即胜
+    else if (this.isFull()) this.winner = "DRAW";
+    else this.turn = (color === BLACK ? WHITE : BLACK);
+    this.lastMove = [x, y];
+    this.lastLoops = loops;
+    this.history.push([x, y, color]);
+    return {ok:true, color:color, loops:loops, winner:this.winner};
+  }
+  undo() {
+    if (!this.history.length) return false;
+    const [x, y, color] = this.history.pop();
+    this.board[x][y] = EMPTY;
+    this.winner = null;
+    this.turn = color;
+    this.lastMove = this.history.length ? [this.history[this.history.length-1][0],
+                                           this.history[this.history.length-1][1]] : null;
+    this.lastLoops = [];
+    return true;
+  }
+  _sameColorNeighbors(x, y, color) {
+    const out = [];
+    if (x > 0 && this.board[x-1][y] === color) out.push([x-1, y]);
+    if (x < this.n-1 && this.board[x+1][y] === color) out.push([x+1, y]);
+    if (y > 0 && this.board[x][y-1] === color) out.push([x, y-1]);
+    if (y < this.n-1 && this.board[x][y+1] === color) out.push([x, y+1]);
+    return out;
+  }
+  _component(start, avoid, color) {
+    const seen = new Set([start[0]+","+start[1]]);
+    const stack = [start];
+    while (stack.length) {
+      const cur = stack.pop();
+      for (const nb of this._sameColorNeighbors(cur[0], cur[1], color)) {
+        const k = nb[0]+","+nb[1];
+        if ((nb[0]===avoid[0]&&nb[1]===avoid[1]) || seen.has(k)) continue;
+        seen.add(k);
+        stack.push(nb);
+      }
+    }
+    return seen;
+  }
+  _findNewCycles(x, y, color) {
+    const nbrs = this._sameColorNeighbors(x, y, color);
+    const cycles = [];
+    const seenKeys = new Set();
+    for (let i = 0; i < nbrs.length; i++)
+      for (let j = i+1; j < nbrs.length; j++) {
+        const path = this._shortestPath(nbrs[i], nbrs[j], [x,y], color);
+        if (path === null) continue;
+        const cycle = [[x,y]].concat(path);
+        const key = cycle.map(p=>p[0]+","+p[1]).sort().join("|");
+        if (!seenKeys.has(key)) { seenKeys.add(key); cycles.push(cycle); }
+      }
+    return cycles;
+  }
+  _shortestPath(start, target, avoid, color) {
+    // BFS 求 start→target 最短简单路径(避开 avoid); 不可达返回 null
+    const parent = new Map([[start[0]+","+start[1], null]]);
+    const queue = [start];
+    let head = 0;
+    while (head < queue.length) {
+      const cur = queue[head++];
+      if (cur[0]===target[0] && cur[1]===target[1]) break;
+      for (const nb of this._sameColorNeighbors(cur[0], cur[1], color)) {
+        const k = nb[0]+","+nb[1];
+        if ((nb[0]===avoid[0]&&nb[1]===avoid[1]) || parent.has(k)) continue;
+        parent.set(k, cur);
+        queue.push(nb);
+      }
+    }
+    const tk = target[0]+","+target[1];
+    if (!parent.has(tk)) return null;
+    const path = [];
+    let cur = target;
+    while (cur !== null) { path.push(cur); cur = parent.get(cur[0]+","+cur[1]); }
+    path.reverse();
+    return path;
+  }
+  // 射线法: 半开区间规则 (y1>py)!=(y2>py), 奇数→内部
+  static pointInPolygon(px, py, poly) {
+    // 射线法(半开区间规则), 当前规则不参与结算, 供规则变体使用
+    let inside = false;
+    const m = poly.length;
+    for (let i = 0; i < m; i++) {
+      const [x1, y1] = poly[i];
+      const [x2, y2] = poly[(i+1)%m];
+      if ((y1 > py) !== (y2 > py)) {
+        const xi = x1 + (py - y1) * (x2 - x1) / (y2 - y1);
+        if (xi > px) inside = !inside;
+      }
+    }
+    return inside;
+  }
+}
+
+// ================= AI 对手(威胁推理 + α-β, 与 Python 版同算法) =================
+class _DSU {
+  constructor(size) { this.p = Array.from({length: size}, (_, i) => i); }
+  find(x) {
+    while (this.p[x] !== x) { this.p[x] = this.p[this.p[x]]; x = this.p[x]; }
+    return x;
+  }
+  union(a, b) {
+    const ra = this.find(a), rb = this.find(b);
+    if (ra !== rb) this.p[ra] = rb;
+  }
+}
+
+const AI_WIN = 1000000, AI_LOSS = -1000000;
+
+class JordanAI {
+  constructor(game, color, timeBudget = 1.2, maxDepth = 3, seed = 1) {
+    this.game = game; this.color = color;
+    this.opp = (color === BLACK ? WHITE : BLACK);
+    this.timeBudget = timeBudget; this.maxDepth = maxDepth;
+    this._deadline = 0; this._candLimit = 14;
+    this._s = (seed || 1) >>> 0;
+  }
+  _rng() {   // 确定性伪随机 0..1
+    this._s = (this._s * 1103515245 + 12345) & 0x7fffffff;
+    return this._s / 0x7fffffff;
+  }
+  _idx(x, y) { return x * this.game.n + y; }
+  _buildDsu(color) {
+    const g = this.game, n = g.n, b = g.board;
+    const dsu = new _DSU(n * n);
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++) {
+        if (b[x][y] !== color) continue;
+        const i = this._idx(x, y);
+        if (x > 0 && b[x-1][y] === color) dsu.union(i, this._idx(x-1, y));
+        if (x < n-1 && b[x+1][y] === color) dsu.union(i, this._idx(x+1, y));
+        if (y > 0 && b[x][y-1] === color) dsu.union(i, this._idx(x, y-1));
+        if (y < n-1 && b[x][y+1] === color) dsu.union(i, this._idx(x, y+1));
+      }
+    return dsu;
+  }
+  _threats(color, limit) {
+    const g = this.game, n = g.n, b = g.board;
+    const dsu = this._buildDsu(color);
+    const res = [];
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++) {
+        if (b[x][y] !== EMPTY) continue;
+        const nbr = [];
+        if (x > 0 && b[x-1][y] === color) nbr.push(this._idx(x-1, y));
+        if (x < n-1 && b[x+1][y] === color) nbr.push(this._idx(x+1, y));
+        if (y > 0 && b[x][y-1] === color) nbr.push(this._idx(x, y-1));
+        if (y < n-1 && b[x][y+1] === color) nbr.push(this._idx(x, y+1));
+        if (nbr.length < 2) continue;
+        let hit = false;
+        for (let i = 0; i < nbr.length - 1 && !hit; i++) {
+          const ri = dsu.find(nbr[i]);
+          for (let j = i+1; j < nbr.length; j++)
+            if (ri === dsu.find(nbr[j])) { hit = true; break; }
+        }
+        if (hit) {
+          res.push([x, y]);
+          if (limit !== undefined && res.length >= limit) return res;
+        }
+      }
+    return res;
+  }
+  _t2AndForks(color) {
+    const g = this.game, n = g.n, b = g.board;
+    const cands = new Set();
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++) {
+        if (b[x][y] !== EMPTY) continue;
+        let cnt = 0;
+        if (x > 0 && b[x-1][y] === color) cnt++;
+        if (x < n-1 && b[x+1][y] === color) cnt++;
+        if (y > 0 && b[x][y-1] === color) cnt++;
+        if (y < n-1 && b[x][y+1] === color) cnt++;
+        if (cnt >= 2) cands.add(x + "," + y);
+      }
+    const t2 = [], forks = [];
+    for (const k of cands) {
+      const xy = k.split(",").map(Number);
+      b[xy[0]][xy[1]] = color;
+      const t = this._threats(color, 3);
+      b[xy[0]][xy[1]] = EMPTY;
+      if (t.length >= 2) forks.push([xy[0], xy[1]]);
+      else if (t.length === 1) t2.push([xy[0], xy[1]]);
+    }
+    return [t2, forks];
+  }
+  _genMoves(color, top) {
+    const g = this.game, n = g.n, b = g.board;
+    const opp = (color === BLACK ? WHITE : BLACK);
+    const scored = [];
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++) {
+        if (b[x][y] !== EMPTY) continue;
+        let nm = 0, no = 0;
+        if (x > 0) { const c = b[x-1][y]; if (c === color) nm++; else if (c === opp) no++; }
+        if (x < n-1) { const c = b[x+1][y]; if (c === color) nm++; else if (c === opp) no++; }
+        if (y > 0) { const c = b[x][y-1]; if (c === color) nm++; else if (c === opp) no++; }
+        if (y < n-1) { const c = b[x][y+1]; if (c === color) nm++; else if (c === opp) no++; }
+        if (nm === 0 && no === 0) continue;
+        const s = nm*5 + no*3
+          + 0.3*((n - Math.abs(2*x-(n-1))) + (n - Math.abs(2*y-(n-1))))
+          + (this._rng() - 0.5);
+        scored.push([s, [x, y]]);
+      }
+    scored.sort((a, b) => b[0] - a[0]);
+    return scored.slice(0, top).map(p => p[1]);
+  }
+  _rootCandidates(t2m, fm, t2o, fo) {
+    const g = this.game, n = g.n, b = g.board;
+    const pool = new Map();
+    const setp = (v, s) => {
+      const k = v[0]+","+v[1];
+      if (!pool.has(k) || pool.get(k) < s) pool.set(k, s);
+    };
+    for (const v of fm) setp(v, 5000);
+    for (const v of fo) setp(v, 4600);
+    for (const v of t2m) setp(v, 3000);
+    for (const v of t2o) setp(v, 2800);
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++) {
+        const c = b[x][y];
+        if (c === EMPTY) continue;
+        const base = (c === this.color) ? 1200 : 800;
+        if (x > 0 && b[x-1][y] === EMPTY) setp([x-1, y], base);
+        if (x < n-1 && b[x+1][y] === EMPTY) setp([x+1, y], base);
+        if (y > 0 && b[x][y-1] === EMPTY) setp([x, y-1], base);
+        if (y < n-1 && b[x][y+1] === EMPTY) setp([x, y+1], base);
+      }
+    const cx = (n-1)/2, cy = (n-1)/2;
+    const items = [];
+    for (const [k, s] of pool) {
+      const xy = k.split(",").map(Number);
+      items.push([s + 20*(n - Math.abs(xy[0]-cx) - Math.abs(xy[1]-cy))
+                  + (this._rng() - 0.5), [xy[0], xy[1]], s]);
+    }
+    items.sort((a, b) => b[0] - a[0]);
+    return items.slice(0, this._candLimit).map(p => [p[1], p[2]]);
+  }
+  _evaluate(me) {
+    const opp = (me === BLACK ? WHITE : BLACK);
+    const g = this.game, n = g.n, b = g.board;
+    const dsuM = this._buildDsu(me), dsuO = this._buildDsu(opp);
+    let myConn = 0, oppConn = 0, mySeeds = 0, oppSeeds = 0;
+    let myMob = 0, oppMob = 0, myCnt = 0, oppCnt = 0, oppT1 = 0;
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++) {
+        const c = b[x][y];
+        if (c === me) {
+          myCnt++;
+          if (x > 0 && b[x-1][y] === EMPTY) myMob++;
+          if (x < n-1 && b[x+1][y] === EMPTY) myMob++;
+          if (y > 0 && b[x][y-1] === EMPTY) myMob++;
+          if (y < n-1 && b[x][y+1] === EMPTY) myMob++;
+        } else if (c === opp) {
+          oppCnt++;
+          if (x > 0 && b[x-1][y] === EMPTY) oppMob++;
+          if (x < n-1 && b[x+1][y] === EMPTY) oppMob++;
+          if (y > 0 && b[x][y-1] === EMPTY) oppMob++;
+          if (y < n-1 && b[x][y+1] === EMPTY) oppMob++;
+        } else {
+          const mRoots = new Set(), oRoots = new Set();
+          let mN = 0, oN = 0;
+          if (x > 0) {
+            const cc = b[x-1][y];
+            if (cc === me) { mN++; mRoots.add(dsuM.find(this._idx(x-1, y))); }
+            else if (cc === opp) { oN++; oRoots.add(dsuO.find(this._idx(x-1, y))); }
+          }
+          if (x < n-1) {
+            const cc = b[x+1][y];
+            if (cc === me) { mN++; mRoots.add(dsuM.find(this._idx(x+1, y))); }
+            else if (cc === opp) { oN++; oRoots.add(dsuO.find(this._idx(x+1, y))); }
+          }
+          if (y > 0) {
+            const cc = b[x][y-1];
+            if (cc === me) { mN++; mRoots.add(dsuM.find(this._idx(x, y-1))); }
+            else if (cc === opp) { oN++; oRoots.add(dsuO.find(this._idx(x, y-1))); }
+          }
+          if (y < n-1) {
+            const cc = b[x][y+1];
+            if (cc === me) { mN++; mRoots.add(dsuM.find(this._idx(x, y+1))); }
+            else if (cc === opp) { oN++; oRoots.add(dsuO.find(this._idx(x, y+1))); }
+          }
+          if (mN >= 2 && mRoots.size < mN) return AI_WIN;
+          if (oN >= 2 && oRoots.size < oN) {
+            oppT1++;
+            if (oppT1 >= 2) return AI_LOSS;
+          }
+          myConn += mRoots.size; oppConn += oRoots.size;
+          if (mRoots.size >= 2) mySeeds++;
+          if (oRoots.size >= 2) oppSeeds++;
+        }
+      }
+    let score = 250*(mySeeds - oppSeeds) + 30*(myConn - oppConn)
+      + 20*(myMob - oppMob) + 2*(myCnt - oppCnt);
+    if (oppT1 === 1) score -= 120;
+    return score;
+  }
+  _negamax(depth, alpha, beta, toMove) {
+    if (performance.now() > this._deadline) return 0;
+    if (this._threats(toMove, 1).length) return AI_WIN;
+    const opp = (toMove === BLACK ? WHITE : BLACK);
+    const t1o = this._threats(opp, 2);
+    if (t1o.length >= 2) return AI_LOSS;
+    if (depth <= 0) return this._evaluate(toMove);
+    const cands = (t1o.length === 1) ? [t1o[0]] : this._genMoves(toMove, this._candLimit);
+    const b = this.game.board;
+    let best = AI_LOSS;
+    for (const mv of cands) {
+      if (performance.now() > this._deadline) break;
+      b[mv[0]][mv[1]] = toMove;
+      const v = -this._negamax(depth-1, -beta, -alpha, opp);
+      b[mv[0]][mv[1]] = EMPTY;
+      if (v > best) best = v;
+      if (v > alpha) alpha = v;
+      if (alpha >= beta) break;
+    }
+    return best;
+  }
+  chooseMove() {
+    this._deadline = performance.now() + this.timeBudget * 1000;
+    const g = this.game, n = g.n, b = g.board;
+    this._candLimit = (n <= 15 ? 14 : 12);
+    const t1 = this._threats(this.color, 1);
+    if (t1.length) return t1[0];
+    const t1o = this._threats(this.opp, 3);
+    if (t1o.length === 1) return t1o[0];
+    if (t1o.length >= 2) {
+      const c = this._genMoves(this.color, 6);
+      return c.length ? c[0] : this._anyEmpty();
+    }
+    const t0 = performance.now();
+    const tf = this._t2AndForks(this.color);
+    const of = this._t2AndForks(this.opp);
+    this._deadline = performance.now()
+      + Math.max(50, this.timeBudget*1000 - (performance.now() - t0));
+    if (tf[1].length) return tf[1][0];        // 己方 fork: 必胜
+    if (of[1].length) return of[1][0];        // 对方 fork: 必堵
+    const cands = this._rootCandidates(tf[0], tf[1], of[0], of[1]);
+    if (!cands.length) return this._anyEmpty();
+    const depth = (n <= 15) ? Math.min(this.maxDepth, 5)
+                            : Math.min(this.maxDepth, 4);
+    let bestMove = cands[0][0], bestPrio = cands[0][1], bestVal = AI_LOSS - 1;
+    for (const [mv, prio] of cands) {
+      if (performance.now() > this._deadline) break;
+      b[mv[0]][mv[1]] = this.color;
+      const v = -this._negamax(depth-1, AI_LOSS, AI_WIN, this.opp);
+      b[mv[0]][mv[1]] = EMPTY;
+      if (v > bestVal + 25 || (bestVal - 25 <= v && prio > bestPrio)) {
+        bestVal = v; bestMove = mv; bestPrio = prio;
+      }
+      if (v >= AI_WIN) break;
+    }
+    return bestMove;
+  }
+  _anyEmpty() {
+    const g = this.game, n = g.n, b = g.board;
+    let best = null, bd = 1e9;
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++)
+        if (b[x][y] === EMPTY) {
+          const d = Math.abs(x-(n-1)/2) + Math.abs(y-(n-1)/2);
+          if (d < bd) { bd = d; best = [x, y]; }
+        }
+    return best;
+  }
+}
+
+// ================= 界面 =================
+const canvas = document.getElementById("board");
+const ctx = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
+const sizeInput = document.getElementById("size");
+const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+let MARGIN = 20, CELL = 60, SIZE = 660;
+let game = null;
+
+// 画布自适应: 不超过视口宽, 格子大小随棋盘尺寸变化
+function resizeCanvas() {
+  const avail = Math.min(660, (window.innerWidth || 390) - 16);
+  MARGIN = Math.max(14, Math.round(avail * 0.05));
+  CELL = (avail - MARGIN * 2) / game.size;   // size = 方格数 = 格点段数
+  SIZE = avail;
+  canvas.width = SIZE * dpr; canvas.height = SIZE * dpr;
+  canvas.style.width = SIZE + "px"; canvas.style.height = SIZE + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);    // 重置并应用高分屏缩放
+}
+
+let boardSize = 10;
+function startNewGame() {
+  game = new JordanChess(boardSize);
+  resizeCanvas();
+  statusEl.textContent = `新局开始：黑方先手（${boardSize}×${boardSize} 方格）`;
+  statusEl.classList.add("info");
+  draw();
+}
+function applySizeFromInput() {
+  const v = parseInt(sizeInput.value, 10);
+  if (!Number.isInteger(v) || v < 2 || v > 30) {
+    sizeInput.value = boardSize;
+    statusEl.textContent = "棋盘大小需为 2~30 的整数";
+    statusEl.classList.add("info");
+    return;
+  }
+  boardSize = v;
+  startNewGame();
+}
+
+function xy(x, y) { return [MARGIN + x * CELL, MARGIN + y * CELL]; }
+
+function draw() {
+  ctx.clearRect(0, 0, SIZE, SIZE);
+  // 网格
+  ctx.strokeStyle = "#999"; ctx.lineWidth = 1;
+  const gridEnd = MARGIN + (game.n - 1) * CELL;
+  for (let i = 0; i < game.n; i++) {
+    const p = MARGIN + i * CELL;
+    ctx.beginPath(); ctx.moveTo(p, MARGIN); ctx.lineTo(p, gridEnd); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(MARGIN, p); ctx.lineTo(gridEnd, p); ctx.stroke();
+  }
+  // 坐标标签
+  ctx.fillStyle = "#888"; ctx.font = "11px sans-serif"; ctx.textAlign = "center";
+  for (let i = 0; i < game.n; i++) {
+    ctx.fillText(i, MARGIN + i*CELL, MARGIN - 8);
+    ctx.fillText(i, MARGIN - 14, MARGIN + i*CELL + 4);
+  }
+  // 闭环高亮
+  const loopWidth = Math.max(2, Math.round(CELL * 0.09));
+  for (const loop of game.lastLoops) {
+    const pts = loop.map(([x,y]) => xy(x,y));
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(211,47,47,0.14)"; ctx.fill();
+    ctx.strokeStyle = "#d32f2f"; ctx.lineWidth = loopWidth; ctx.stroke();
+  }
+  // 棋子(大小随棋盘格子缩放, 直径约 0.84 格)
+  const pieceR = CELL * 0.42;
+  for (let x = 0; x < game.n; x++)
+    for (let y = 0; y < game.n; y++) {
+      const c = game.board[x][y];
+      if (c === EMPTY) continue;
+      const [px, py] = xy(x, y);
+      ctx.beginPath(); ctx.arc(px, py, pieceR, 0, Math.PI*2);
+      ctx.fillStyle = (c === BLACK) ? "#1a1a1a" : "#fafafa";
+      ctx.fill();
+      ctx.strokeStyle = "#999"; ctx.lineWidth = Math.max(1, CELL * 0.045); ctx.stroke();
+    }
+  // 最后一步(光圈随格子缩放)
+  if (game.lastMove) {
+    const [px, py] = xy(game.lastMove[0], game.lastMove[1]);
+    ctx.beginPath(); ctx.arc(px, py, CELL * 0.52, 0, Math.PI*2);
+    ctx.strokeStyle = "#e0b020"; ctx.lineWidth = loopWidth; ctx.stroke();
+  }
+  // 状态
+  statusEl.className = "";
+  if (game.winner !== null) {
+    if (game.winner === "DRAW") statusEl.textContent = "棋盘已满 —— 平局！";
+    else { statusEl.textContent = CNAME[game.winner] + "获胜！"; statusEl.classList.add("win"); }
+  } else {
+    statusEl.textContent = "轮到：" + CNAME[game.turn];
+  }
+}
+
+canvas.addEventListener("click", (ev) => {
+  if (game.winner !== null) return;
+  if (aiMode && game.turn === WHITE) return;   // AI 轮次, 忽略人手
+  const rect = canvas.getBoundingClientRect();
+  const sx = (ev.clientX - rect.left) * (SIZE / rect.width);
+  const sy = (ev.clientY - rect.top) * (SIZE / rect.height);
+  let best = null, bestD = CELL * 0.5;
+  for (let x = 0; x < game.n; x++)
+    for (let y = 0; y < game.n; y++) {
+      const [px, py] = xy(x, y);
+      const d = Math.hypot(sx - px, sy - py);
+      if (d < bestD) { best = [x, y]; bestD = d; }
+    }
+  if (!best) return;
+  const r = game.place(best[0], best[1]);
+  if (!r.ok) {
+    statusEl.textContent = r.reason;
+    statusEl.classList.add("info");
+  } else if (r.loops.length > 0) {
+    statusEl.textContent = `★ 形成闭环 ${r.loops.length} 个 —— 立即获胜！`;
+    statusEl.classList.add("info");
+    draw();
+    setTimeout(draw, 400);   // 稍后展示胜利横幅
+  }
+  draw();
+  if (aiMode && game.winner === null && game.turn === WHITE) aiMove();
+});
+
+document.getElementById("undo").addEventListener("click", () => {
+  if (game.undo()) statusEl.textContent = "已悔棋。";
+  else statusEl.textContent = "没有可撤销的步骤。";
+  statusEl.classList.add("info");
+  draw();
+});
+document.getElementById("new").addEventListener("click", applySizeFromInput);
+sizeInput.addEventListener("change", applySizeFromInput);
+
+// ---- 人机模式: 人类执黑, AI 执白 ----
+let aiMode = false;
+let ai = null;
+const aiBtn = document.getElementById("ai");
+function ensureAI() {
+  if (!ai || ai.game !== game) ai = new JordanAI(game, WHITE, 2.0, 5);
+  return ai;
+}
+function aiMove() {
+  if (!aiMode || game.winner !== null || game.turn !== WHITE) return;
+  statusEl.textContent = "AI 思考中…";
+  statusEl.classList.add("info");
+  draw();
+  setTimeout(() => {
+    const mv = ensureAI().chooseMove();
+    const r = game.place(mv[0], mv[1]);
+    if (r.ok && r.loops.length > 0) {
+      statusEl.textContent = `★ AI 形成闭环 ${r.loops.length} 个 —— AI 获胜！`;
+      statusEl.classList.add("info");
+    } else if (r.ok) {
+      statusEl.textContent = `AI 落子：(${mv[0]}, ${mv[1]})`;
+      statusEl.classList.add("info");
+    }
+    draw();
+  }, 30);
+}
+aiBtn.addEventListener("click", () => {
+  aiMode = !aiMode;
+  aiBtn.classList.toggle("on", aiMode);
+  if (aiMode) {
+    statusEl.textContent = "人机模式：你执黑（先手），AI 执白。";
+  } else {
+    statusEl.textContent = "双人模式。";
+  }
+  statusEl.classList.add("info");
+  draw();
+  if (aiMode && game.winner === null && game.turn === WHITE) aiMove();
+});
+
+startNewGame();   // 首次开局(默认 10×10)
+</script>
+</body>
+</html>
