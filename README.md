@@ -27,12 +27,15 @@
 ```
 jordan-chess/
 ├── engine.py        核心引擎（纯 Python，无依赖）—— 棋盘/连通性/环路检测/胜负结算/悔棋
-├── ai.py            AI 对手（威胁推理 + α-β 剪枝，纯 Python）
+├── ai.py            第二代 AI（完整威胁推理 + 迭代加深搜索，纯 Python）
 ├── cli.py           命令行版（python3 cli.py [大小] [--ai]）
 ├── gui.py           pygame 图形界面版（pip install pygame，python3 gui.py [大小]）
 ├── index.html       浏览器版（单文件，自适应移动端，含 AI）
 ├── test_engine.py   引擎自测（python3 test_engine.py [-v]）
 ├── test_ai.py       AI 自测（python3 test_ai.py [-v]）
+├── test_browser_ai.mjs  浏览器 AI 无头自测（Node.js，可选）
+├── benchmark_ai.py  新旧 AI 成对换色对战，输出 CSV/JSON
+├── plot_benchmark.py 对战数据生成 SVG 图（无第三方依赖）
 └── README.md
 ```
 
@@ -53,18 +56,28 @@ python3 gui.py --ai          # 或运行时点按钮
 # 浏览器版: 点「人机」+「执黑/执白」选边
 ```
 
-**AI 算法**（ai.py，JS 版同算法移植进 index.html）
+**AI 算法**（ai.py，关键战术与搜索逻辑同步进 index.html）
 
 威胁体系（成环 = 落子即构成约当曲线立即获胜）：
 - **T1 一步威胁**：某空点落子即成环。AI 必走/必堵（永不错过直接胜负）。
 - **T2 两步威胁**：落子后产生 1 个 T1，迫使对手应对（争夺先手）。
 - **fork 双威胁**：落子后产生 ≥2 个 T1。对手只能堵一个 → **两步内必胜**；AI 会主动制造 fork 并抢占对手的 fork 点。
 
-决策梯子：己方 T1 → 堵对方 T1 → 己方 fork → 堵对方 fork → α-β 搜索（根节点精确 T2/fork 推理排序候选，内层强制走法剪枝，叶子用"连接潜力 + fork 种子 + 机动性"评估；时间预算控制搜索宽度）。
+决策流程：己方 T1 → 堵对方唯一 T1 → 比较全部 fork/T2 进攻、防守和反击 → 迭代加深 α-β 搜索。搜索先完整看 1 层，再逐层加深；时间到时丢弃未完成层，只使用最后一层完整结果。相同局面通过置换表复用，深度边界仍有强制威胁时会继续有限延伸。
 
-威胁判定核心：空点 v 的两个同色邻居在同一连通分量（并查集 O(1)）⟺ 落 v 即成环——与引擎的环路检测（逐对 BFS）完全等价，测试已验证二者在所有随机局面一致。Python 版 iSH 环境默认深度 3（~0.5-2s/步）；浏览器版默认深度 5（~0.3-0.5s/步），小棋盘更快。
+威胁判定核心：空点 v 的两个同色邻居在同一连通分量（并查集 O(1)）⟺ 落 v 即成环——与引擎的环路检测（逐对 BFS）完全等价。第二代 AI 也会检查只连接 1 枚己子的延伸走法，因为它仍可能在新棋旁边制造 T1；旧版会漏掉此类战术。Python 与浏览器版均按时间预算逐层加深，默认最多搜索 8 层，小棋盘和强制走法通常更快。
 
-**自测**：`python3 test_ai.py` 8 项 —— 立即取胜/必堵/威胁判定与引擎一致/先手后手均胜随机/AI 对 AI 分出胜负/大棋盘/走法合法且限时。
+**自测**：`python3 test_ai.py` 11 项，新增单邻居 T2、多 fork 防守和超时恢复测试；浏览器 AI 可用 `node test_browser_ai.mjs` 运行 4 项无头测试。
+
+**新旧 AI 对战与可视化**：每个开局走两盘并交换黑白，双方使用相同单步时间上限，避免先手优势误导结果。
+
+```bash
+python3 benchmark_ai.py --pairs 20 --budget 0.08 --output-dir benchmark-output
+python3 plot_benchmark.py benchmark-output/ai_benchmark_games.csv \
+  benchmark-output/ai_benchmark_summary.json benchmark-output/ai_benchmark.svg
+```
+
+输出包括逐盘 CSV、汇总 JSON 和可直接用浏览器打开的 SVG 图。
 
 ## 启动方式
 

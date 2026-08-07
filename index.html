@@ -212,7 +212,7 @@ class _DSU {
 
 const AI_WIN = 1000000, AI_LOSS = -1000000;
 
-class JordanAI {
+class LegacyJordanAI {
   constructor(game, color, timeBudget = 1.2, maxDepth = 3, seed = 1) {
     this.game = game; this.color = color;
     this.opp = (color === BLACK ? WHITE : BLACK);
@@ -470,6 +470,277 @@ class JordanAI {
   }
 }
 
+const AI_TIMEOUT_V2 = Symbol("ai-timeout-v2");
+
+class JordanAI extends LegacyJordanAI {
+  constructor(game, color, timeBudget = 1.2, maxDepth = 8, seed = 1) {
+    super(game, color, timeBudget, maxDepth, seed);
+    this._tt = new Map();
+    this._nodes = 0;
+    this._ttHits = 0;
+    this.lastStats = {completedDepth: 0, nodes: 0, ttHits: 0,
+                      elapsed: 0, score: 0};
+  }
+
+  _checkTime() {
+    if (this._deadline > 0 && performance.now() >= this._deadline)
+      throw AI_TIMEOUT_V2;
+  }
+
+  _stateKey(toMove) {
+    const b = this.game.board, n = this.game.n;
+    let key = String(toMove) + "|";
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++) key += String(b[x][y]);
+    return key;
+  }
+
+  _boardFull() {
+    const b = this.game.board, n = this.game.n;
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++)
+        if (b[x][y] === EMPTY) return false;
+    return true;
+  }
+
+  _t2AndForks(color) {
+    // 单邻居延伸也可能在新棋旁边制造 T1，因此候选条件必须是 >=1。
+    const g = this.game, n = g.n, b = g.board;
+    const cands = [];
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++) {
+        if (b[x][y] !== EMPTY) continue;
+        let count = 0;
+        if (x > 0 && b[x-1][y] === color) count++;
+        if (x < n-1 && b[x+1][y] === color) count++;
+        if (y > 0 && b[x][y-1] === color) count++;
+        if (y < n-1 && b[x][y+1] === color) count++;
+        if (count >= 1) cands.push([x, y]);
+      }
+    const t2 = [], forks = [];
+    for (const move of cands) {
+      this._checkTime();
+      b[move[0]][move[1]] = color;
+      let threats;
+      try {
+        threats = this._threats(color, 3);
+      } finally {
+        b[move[0]][move[1]] = EMPTY;
+      }
+      if (threats.length >= 2) forks.push(move);
+      else if (threats.length === 1) t2.push(move);
+    }
+    return [t2, forks];
+  }
+
+  _genMoves(color, top) {
+    // 去掉搜索顺序中的随机噪声，使逐层加深和回归测试可复现。
+    const g = this.game, n = g.n, b = g.board;
+    const opp = (color === BLACK ? WHITE : BLACK);
+    const scored = [];
+    for (let x = 0; x < n; x++)
+      for (let y = 0; y < n; y++) {
+        if (b[x][y] !== EMPTY) continue;
+        let mine = 0, theirs = 0;
+        if (x > 0) { const c=b[x-1][y]; if (c===color) mine++; else if (c===opp) theirs++; }
+        if (x < n-1) { const c=b[x+1][y]; if (c===color) mine++; else if (c===opp) theirs++; }
+        if (y > 0) { const c=b[x][y-1]; if (c===color) mine++; else if (c===opp) theirs++; }
+        if (y < n-1) { const c=b[x][y+1]; if (c===color) mine++; else if (c===opp) theirs++; }
+        if (mine === 0 && theirs === 0) continue;
+        const centrality = 0.3*((n-Math.abs(2*x-(n-1)))+
+                                (n-Math.abs(2*y-(n-1))));
+        scored.push([mine*5 + theirs*3 + centrality, [x,y]]);
+      }
+    scored.sort((a,b) => b[0]-a[0] || a[1][0]-b[1][0] || a[1][1]-b[1][1]);
+    return scored.slice(0, top).map(item => item[1]);
+  }
+
+  _rootCandidates(t2m, fm, t2o, fo) {
+    // 所有战术点都保留；数量限制只作用于普通邻近走法。
+    const b = this.game.board, n = this.game.n;
+    const tactical = new Map(), quiet = new Map();
+    const put = (map, move, score) => {
+      const key = move[0] + "," + move[1];
+      if (!map.has(key) || map.get(key).score < score)
+        map.set(key, {move:[move[0],move[1]], score});
+    };
+    for (const m of fm) put(tactical, m, 5000);
+    for (const m of fo) put(tactical, m, 4600);
+    for (const m of t2m) put(tactical, m, 3000);
+    for (const m of t2o) put(tactical, m, 2800);
+    const cx=(n-1)/2, cy=(n-1)/2;
+    for (let x=0; x<n; x++) for (let y=0; y<n; y++) {
+      const c=b[x][y]; if (c===EMPTY) continue;
+      const base=(c===this.color)?1200:800;
+      for (const [nx,ny] of [[x-1,y],[x+1,y],[x,y-1],[x,y+1]]) {
+        if (nx<0||nx>=n||ny<0||ny>=n||b[nx][ny]!==EMPTY) continue;
+        const key=nx+","+ny;
+        if (!tactical.has(key)) put(quiet,[nx,ny],base);
+      }
+    }
+    const rank = entries => entries.map(item => {
+      const x=item.move[0], y=item.move[1];
+      return [item.score + 20*(n-Math.abs(x-cx)-Math.abs(y-cy)),
+              item.move, item.score];
+    }).sort((a,b)=>b[0]-a[0] || a[1][0]-b[1][0] || a[1][1]-b[1][1]);
+    const forced = rank([...tactical.values()]);
+    const room = Math.max(0, this._candLimit - forced.length);
+    const normal = rank([...quiet.values()]).slice(0, room);
+    return forced.concat(normal).map(item => [item[1],item[2]]);
+  }
+
+  _tacticalCandidates(toMove) {
+    const opp = (toMove===BLACK ? WHITE : BLACK);
+    const mine = this._t2AndForks(toMove);
+    const theirs = this._t2AndForks(opp);
+    const values = new Map();
+    const put = (move, score) => {
+      const key=move[0]+","+move[1];
+      if (!values.has(key)||values.get(key).score<score)
+        values.set(key,{move:[move[0],move[1]],score});
+    };
+    for (const m of mine[1]) put(m,5000);
+    for (const m of theirs[1]) put(m,4600);
+    for (const m of mine[0]) put(m,3000);
+    for (const m of theirs[0]) put(m,2800);
+    return [...values.values()].sort((a,b)=>b.score-a.score ||
+      a.move[0]-b.move[0] || a.move[1]-b.move[1]).map(v=>v.move);
+  }
+
+  _negamax(depth, alpha, beta, toMove, extension=3) {
+    this._nodes++;
+    this._checkTime();
+    const alphaStart=alpha, betaStart=beta;
+    if (this._threats(toMove,1).length) return AI_WIN;
+    const opp=(toMove===BLACK ? WHITE : BLACK);
+    const opponentWins=this._threats(opp,2);
+    if (opponentWins.length>=2) return AI_LOSS;
+    if (this._boardFull()) return 0;
+
+    const key=this._stateKey(toMove);
+    const entry=this._tt.get(key);
+    let ttMove=null;
+    if (entry) {
+      ttMove=entry.move;
+      if (entry.depth>=depth && depth>0) {
+        this._ttHits++;
+        if (entry.flag===0) return entry.score;
+        if (entry.flag===1) alpha=Math.max(alpha,entry.score);
+        else beta=Math.min(beta,entry.score);
+        if (alpha>=beta) return entry.score;
+      }
+    }
+
+    let moves, nextDepth=depth-1, nextExtension=extension;
+    if (opponentWins.length===1) {
+      moves=[opponentWins[0]];
+    } else if (depth<=0) {
+      if (extension<=0) return this._evaluate(toMove);
+      moves=this._tacticalCandidates(toMove).slice(0,10);
+      if (!moves.length) return this._evaluate(toMove);
+      nextDepth=0; nextExtension=extension-1;
+    } else {
+      moves=this._genMoves(toMove,this._candLimit);
+    }
+    if (!moves.length) return 0;
+    if (ttMove) {
+      const index=moves.findIndex(m=>m[0]===ttMove[0]&&m[1]===ttMove[1]);
+      if (index>0) moves=[moves[index],...moves.slice(0,index),...moves.slice(index+1)];
+    }
+
+    const b=this.game.board;
+    let best=AI_LOSS, bestMove=moves[0];
+    for (const move of moves) {
+      this._checkTime();
+      b[move[0]][move[1]]=toMove;
+      let value;
+      try {
+        value=-this._negamax(nextDepth,-beta,-alpha,opp,nextExtension);
+      } finally {
+        b[move[0]][move[1]]=EMPTY;
+      }
+      if (value>best) { best=value; bestMove=move; }
+      if (value>alpha) alpha=value;
+      if (alpha>=beta) break;
+    }
+    if (depth>0) {
+      const flag=best<=alphaStart?2:(best>=betaStart?1:0);
+      this._tt.set(key,{depth,score:best,flag,move:bestMove});
+    }
+    return best;
+  }
+
+  _searchRoot(depth, candidates) {
+    let moves=candidates.map(item=>item[0]);
+    const rootEntry=this._tt.get(this._stateKey(this.color));
+    if (rootEntry) {
+      const i=moves.findIndex(m=>m[0]===rootEntry.move[0]&&m[1]===rootEntry.move[1]);
+      if (i>0) moves=[moves[i],...moves.slice(0,i),...moves.slice(i+1)];
+    }
+    let alpha=AI_LOSS, bestScore=AI_LOSS, bestMove=moves[0];
+    const b=this.game.board;
+    for (const move of moves) {
+      this._checkTime();
+      b[move[0]][move[1]]=this.color;
+      let value;
+      try {
+        value=-this._negamax(depth-1,AI_LOSS,-alpha,this.opp,3);
+      } finally {
+        b[move[0]][move[1]]=EMPTY;
+      }
+      if (value>bestScore) { bestScore=value; bestMove=move; }
+      if (value>alpha) alpha=value;
+      if (value>=AI_WIN) break;
+    }
+    this._tt.set(this._stateKey(this.color),
+                 {depth,score:bestScore,flag:0,move:bestMove});
+    return [bestMove,bestScore];
+  }
+
+  chooseMove() {
+    const started=performance.now();
+    this._deadline=started+Math.max(10,this.timeBudget*1000);
+    this._tt=new Map(); this._nodes=0; this._ttHits=0;
+    let fallback=this._anyEmpty(), completedMove=fallback;
+    let completedDepth=0, completedScore=0;
+    try {
+      const mine=this._threats(this.color,1);
+      if (mine.length) { completedMove=mine[0]; completedScore=AI_WIN; }
+      else {
+        const theirs=this._threats(this.opp,3);
+        if (theirs.length===1) completedMove=theirs[0];
+        else if (theirs.length>=2) {
+          completedMove=theirs[0]; completedScore=AI_LOSS;
+        } else {
+          const tf=this._t2AndForks(this.color);
+          const of=this._t2AndForks(this.opp);
+          if (tf[1].length) {
+            completedMove=tf[1][0]; completedScore=AI_WIN;
+          } else {
+            const candidates=this._rootCandidates(tf[0],tf[1],of[0],of[1]);
+            if (candidates.length) {
+              completedMove=candidates[0][0];
+              for (let depth=1; depth<=this.maxDepth; depth++) {
+                this._checkTime();
+                const result=this._searchRoot(depth,candidates);
+                completedMove=result[0]; completedScore=result[1];
+                completedDepth=depth;
+                if (completedScore>=AI_WIN) break;
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      if (error!==AI_TIMEOUT_V2) throw error;
+    }
+    this.lastStats={completedDepth,nodes:this._nodes,ttHits:this._ttHits,
+                    elapsed:(performance.now()-started)/1000,
+                    score:completedScore};
+    return completedMove;
+  }
+}
+
 // ================= 界面 =================
 const canvas = document.getElementById("board");
 const ctx = canvas.getContext("2d");
@@ -614,7 +885,7 @@ const aiBtn = document.getElementById("ai");
 const sideBtn = document.getElementById("side");
 function aiColor() { return humanColor === BLACK ? WHITE : BLACK; }
 function ensureAI() {
-  if (!ai || ai.game !== game) ai = new JordanAI(game, aiColor(), 2.0, 5);
+  if (!ai || ai.game !== game) ai = new JordanAI(game, aiColor(), 2.0, 8);
   return ai;
 }
 function updateSideBtn() {

@@ -21,6 +21,9 @@
 
 import random
 import time
+from collections import defaultdict
+from dataclasses import dataclass
+from itertools import combinations
 
 from engine import JordanChess, BLACK, WHITE, EMPTY
 
@@ -46,8 +49,8 @@ class _DSU:
             self.p[ra] = rb
 
 
-class JordanAI:
-    """约当棋 AI: 威胁推理 + α-β 搜索。"""
+class LegacyJordanAI:
+    """旧版 AI，保留用于回归测试和新旧版本强度对比。"""
 
     def __init__(self, game, color, time_budget=2.5, max_depth=3, seed=None):
         self.game = game
@@ -462,3 +465,531 @@ class JordanAI:
         if n <= 13:
             return min(self.max_depth, 3)
         return min(self.max_depth, 3)
+
+
+# ============================================================================
+# 第二代 AI
+# ============================================================================
+
+
+class _SearchTimeout(Exception):
+    """搜索时间耗尽；只用于丢弃未完成的迭代。"""
+
+
+@dataclass(frozen=True)
+class _ColorAnalysis:
+    """某一颜色在当前局面的连通结构和立即获胜点。"""
+
+    threats: tuple
+    move_roots: dict
+    frontiers: dict
+    component_sizes: tuple
+
+
+class JordanAI(LegacyJordanAI):
+    """约当棋第二代 AI：完整威胁识别 + 迭代加深 α-β 搜索。
+
+    与旧版相比：
+      * 单邻居延伸也会参与 T2/fork 判定，不再漏掉绕行成环战术；
+      * 对方存在多个 fork 时交给搜索比较全部防守/反击，不任取第一个；
+      * 逐层加深，只采用完整搜索完的一层，超时不会污染最终结果；
+      * 使用局面分析缓存和置换表，减少相同局面的重复计算；
+      * 深度用尽后若仍有强制威胁，会继续搜索有限步数再评分。
+    """
+
+    TT_EXACT = 0
+    TT_LOWER = 1
+    TT_UPPER = 2
+
+    def __init__(self, game, color, time_budget=2.5, max_depth=8, seed=None):
+        super().__init__(game, color, time_budget=time_budget,
+                         max_depth=max_depth, seed=seed)
+        self._deadline = 0.0
+        self._hash = 0
+        self._nodes = 0
+        self._tt_hits = 0
+        self._analysis_cache = {}
+        self._threat_map_cache = {}
+        self._tt = {}
+        self._zobrist = self._make_zobrist()
+        self.last_stats = {
+            'completed_depth': 0,
+            'nodes': 0,
+            'tt_hits': 0,
+            'elapsed': 0.0,
+            'score': 0,
+        }
+
+    # ------------------------------------------------------------------
+    # 棋盘指纹 / 安全模拟
+    # ------------------------------------------------------------------
+    def _make_zobrist(self):
+        """为每个格点和颜色生成固定随机数，用作局面指纹。"""
+        rng = random.Random(0x4A4F5244414E + self.game.n)
+        return [[rng.getrandbits(64), rng.getrandbits(64)]
+                for _ in range(self.game.n * self.game.n)]
+
+    def _compute_hash(self):
+        h = 0
+        n = self.game.n
+        for x in range(n):
+            for y in range(n):
+                c = self.game.board[x][y]
+                if c != EMPTY:
+                    h ^= self._zobrist[self._idx(x, y)][c - 1]
+        return h
+
+    def _play(self, move, color):
+        x, y = move
+        self.game.board[x][y] = color
+        self._hash ^= self._zobrist[self._idx(x, y)][color - 1]
+
+    def _unplay(self, move, color):
+        x, y = move
+        self._hash ^= self._zobrist[self._idx(x, y)][color - 1]
+        self.game.board[x][y] = EMPTY
+
+    def _check_time(self):
+        if time.perf_counter() >= self._deadline:
+            raise _SearchTimeout
+
+    # ------------------------------------------------------------------
+    # 完整威胁分析
+    # ------------------------------------------------------------------
+    def _analyze_color_uncached(self, color):
+        """一次扫描得到连通分量、T1 和各空点邻接的分量。
+
+        move_roots[p] 是空点 p 四周接触到的不同同色连通分量。
+        若 p 同时接触同一分量中的两枚棋子，p 就是立即获胜点。
+        """
+        g = self.game
+        n = g.n
+        b = g.board
+        dsu = self._build_dsu(color)
+        idx = self._idx
+        move_roots = {}
+        frontiers = defaultdict(set)
+        threats = []
+        component_sizes = defaultdict(int)
+
+        for x in range(n):
+            for y in range(n):
+                if b[x][y] == color:
+                    component_sizes[dsu.find(idx(x, y))] += 1
+
+        for x in range(n):
+            for y in range(n):
+                if b[x][y] != EMPTY:
+                    continue
+                roots = []
+                if x > 0 and b[x - 1][y] == color:
+                    roots.append(dsu.find(idx(x - 1, y)))
+                if x < n - 1 and b[x + 1][y] == color:
+                    roots.append(dsu.find(idx(x + 1, y)))
+                if y > 0 and b[x][y - 1] == color:
+                    roots.append(dsu.find(idx(x, y - 1)))
+                if y < n - 1 and b[x][y + 1] == color:
+                    roots.append(dsu.find(idx(x, y + 1)))
+                unique = frozenset(roots)
+                move_roots[(x, y)] = unique
+                if len(unique) < len(roots):
+                    threats.append((x, y))
+                for root in unique:
+                    frontiers[root].add((x, y))
+
+        return _ColorAnalysis(
+            threats=tuple(threats),
+            move_roots=move_roots,
+            frontiers={root: frozenset(points)
+                       for root, points in frontiers.items()},
+            component_sizes=tuple(sorted(component_sizes.values(),
+                                         reverse=True)),
+        )
+
+    def _color_analysis(self, color):
+        key = (self._hash, color)
+        value = self._analysis_cache.get(key)
+        if value is None:
+            value = self._analyze_color_uncached(color)
+            self._analysis_cache[key] = value
+        return value
+
+    def _threats(self, color, limit=None):
+        """兼容旧接口；修正旧版 limit 只跳出内层循环的问题。"""
+        # choose_move 之外也可能被测试直接调用，因此按实际棋盘重新计算。
+        analysis = self._analyze_color_uncached(color)
+        result = list(analysis.threats)
+        return result if limit is None else result[:limit]
+
+    def _threat_map(self, color):
+        """返回 {候选落点: 落子后产生的 T1 点集合}。
+
+        这是 T2/fork 的精确增量判定。单邻居延伸会检查新棋周围的空点；
+        多分量合并还会检查这些分量原有边界的交集，因此远处新出现的
+        T1 也不会漏掉。
+        """
+        key = (self._hash, color)
+        cached = self._threat_map_cache.get(key)
+        if cached is not None:
+            return cached
+
+        analysis = self._color_analysis(color)
+        if analysis.threats:
+            # 已有一步胜点时应直接获胜，不需要另找 T2。
+            self._threat_map_cache[key] = {}
+            return {}
+
+        n = self.game.n
+        b = self.game.board
+        result = {}
+        for move, joined_roots in analysis.move_roots.items():
+            if not joined_roots:
+                continue
+            x, y = move
+            created = set()
+
+            # 新棋把多个原本分离的分量连接后，它们共同接触的空点会成 T1。
+            if len(joined_roots) >= 2:
+                for a, c in combinations(joined_roots, 2):
+                    created.update(analysis.frontiers.get(a, ()) &
+                                   analysis.frontiers.get(c, ()))
+
+            # 即使只接触一个己方分量，也可能在新棋旁边制造 T1。
+            for nx, ny in ((x - 1, y), (x + 1, y),
+                           (x, y - 1), (x, y + 1)):
+                if not (0 <= nx < n and 0 <= ny < n):
+                    continue
+                q = (nx, ny)
+                if b[nx][ny] != EMPTY or q == move:
+                    continue
+                if analysis.move_roots.get(q, frozenset()) & joined_roots:
+                    created.add(q)
+
+            created.discard(move)  # move 落子后已不再是空点。
+            if created:
+                result[move] = tuple(sorted(created))
+
+        self._threat_map_cache[key] = result
+        return result
+
+    def _t2_and_forks(self, color):
+        """兼容公开测试接口，使用新的完整 T2/fork 判定。"""
+        old_hash = self._hash
+        self._hash = self._compute_hash()
+        try:
+            mapping = self._threat_map(color)
+            t2 = [move for move, wins in mapping.items() if len(wins) == 1]
+            forks = [move for move, wins in mapping.items() if len(wins) >= 2]
+            return sorted(t2), sorted(forks)
+        finally:
+            self._hash = old_hash
+
+    # ------------------------------------------------------------------
+    # 走法生成和静态评分
+    # ------------------------------------------------------------------
+    def _positional_score(self, move, color):
+        """普通走法排序；只影响搜索先后，不直接决定胜负。"""
+        x, y = move
+        b = self.game.board
+        n = self.game.n
+        opp = WHITE if color == BLACK else BLACK
+        mine = theirs = 0
+        for nx, ny in ((x - 1, y), (x + 1, y),
+                       (x, y - 1), (x, y + 1)):
+            if 0 <= nx < n and 0 <= ny < n:
+                c = b[nx][ny]
+                if c == color:
+                    mine += 1
+                elif c == opp:
+                    theirs += 1
+        center = (n - 1) / 2.0
+        centrality = 2 * n - abs(x - center) - abs(y - center)
+        return 30 * mine + 20 * theirs + centrality
+
+    def _candidate_moves(self, to_move, depth, root=False,
+                         tactical_only=False, tt_move=None):
+        """关键战术走法全部保留，只限制普通走法数量。"""
+        mine = self._color_analysis(to_move)
+        opp = WHITE if to_move == BLACK else BLACK
+        theirs = self._color_analysis(opp)
+        b = self.game.board
+        n = self.game.n
+
+        # 对手已有唯一 T1 时只有占住该点才能活下来。
+        if len(theirs.threats) == 1:
+            return [theirs.threats[0]]
+
+        my_map = self._threat_map(to_move)
+        opp_map = self._threat_map(opp)
+        my_forks = {m for m, wins in my_map.items() if len(wins) >= 2}
+        opp_forks = {m for m, wins in opp_map.items() if len(wins) >= 2}
+        my_t2 = set(my_map) - my_forks
+        opp_t2 = set(opp_map) - opp_forks
+        future_blocks = {point for move in opp_forks
+                         for point in opp_map[move]}
+
+        tactical = my_forks | opp_forks | my_t2 | opp_t2 | future_blocks
+        tactical = {m for m in tactical if b[m[0]][m[1]] == EMPTY}
+
+        scored = {}
+        for move in tactical:
+            score = self._positional_score(move, to_move)
+            if move in my_forks:
+                score += 120000
+            if move in opp_forks:
+                score += 90000
+            if move in my_t2:
+                score += 60000
+            if move in opp_t2:
+                score += 42000
+            if move in future_blocks:
+                score += 30000
+            scored[move] = score
+
+        if not tactical_only:
+            quiet = []
+            for x in range(n):
+                for y in range(n):
+                    if b[x][y] != EMPTY or (x, y) in scored:
+                        continue
+                    s = self._positional_score((x, y), to_move)
+                    # 非空局面优先研究双方棋形附近；根节点仍保留较宽选择。
+                    adjacent = False
+                    for nx, ny in ((x - 1, y), (x + 1, y),
+                                   (x, y - 1), (x, y + 1)):
+                        if 0 <= nx < n and 0 <= ny < n \
+                                and b[nx][ny] != EMPTY:
+                            adjacent = True
+                            break
+                    if adjacent or not self.game.history:
+                        quiet.append((s, (x, y)))
+            quiet.sort(key=lambda item: (-item[0], item[1]))
+            if root:
+                quiet_limit = 28 if n <= 15 else 20
+            elif depth >= 5:
+                quiet_limit = 10
+            elif depth >= 3:
+                quiet_limit = 14
+            else:
+                quiet_limit = 18
+            for s, move in quiet[:quiet_limit]:
+                scored[move] = s
+
+        if not scored:
+            # 极稀疏或残局兜底。
+            for x in range(n):
+                for y in range(n):
+                    if b[x][y] == EMPTY:
+                        scored[(x, y)] = self._positional_score(
+                            (x, y), to_move)
+
+        if tt_move in scored:
+            scored[tt_move] += 250000
+        return [move for move, _ in sorted(
+            scored.items(), key=lambda item: (-item[1], item[0]))]
+
+    def _evaluate_position(self, me):
+        """在没有立即胜负时评价双方未来制造威胁的能力。"""
+        opp = WHITE if me == BLACK else BLACK
+        mine = self._color_analysis(me)
+        theirs = self._color_analysis(opp)
+        my_map = self._threat_map(me)
+        opp_map = self._threat_map(opp)
+        my_forks = sum(len(wins) >= 2 for wins in my_map.values())
+        opp_forks = sum(len(wins) >= 2 for wins in opp_map.values())
+        my_t2 = len(my_map) - my_forks
+        opp_t2 = len(opp_map) - opp_forks
+        my_bridges = sum(len(roots) >= 2
+                         for roots in mine.move_roots.values())
+        opp_bridges = sum(len(roots) >= 2
+                          for roots in theirs.move_roots.values())
+        my_frontier = sum(bool(roots) for roots in mine.move_roots.values())
+        opp_frontier = sum(bool(roots)
+                           for roots in theirs.move_roots.values())
+        my_largest = mine.component_sizes[0] if mine.component_sizes else 0
+        opp_largest = theirs.component_sizes[0] if theirs.component_sizes else 0
+        return (12000 * (my_forks - opp_forks)
+                + 750 * (my_t2 - opp_t2)
+                + 80 * (my_bridges - opp_bridges)
+                + 10 * (my_frontier - opp_frontier)
+                + 6 * (my_largest - opp_largest))
+
+    # ------------------------------------------------------------------
+    # 迭代加深 α-β 搜索
+    # ------------------------------------------------------------------
+    def _negamax(self, depth, alpha, beta, to_move, extension=4):
+        self._nodes += 1
+        self._check_time()
+        alpha_start = alpha
+        mine = self._color_analysis(to_move)
+        opp = WHITE if to_move == BLACK else BLACK
+        theirs = self._color_analysis(opp)
+
+        if mine.threats:
+            return WIN
+        if len(theirs.threats) >= 2:
+            return LOSS
+        if not mine.move_roots:
+            return 0                              # 满盘且无人成环：平局
+
+        tt_key = (self._hash, to_move)
+        tt_entry = self._tt.get(tt_key)
+        tt_move = None
+        if tt_entry is not None:
+            tt_depth, tt_score, tt_flag, tt_move = tt_entry
+            if tt_depth >= depth and depth > 0:
+                self._tt_hits += 1
+                if tt_flag == self.TT_EXACT:
+                    return tt_score
+                if tt_flag == self.TT_LOWER:
+                    alpha = max(alpha, tt_score)
+                else:
+                    beta = min(beta, tt_score)
+                if alpha >= beta:
+                    return tt_score
+
+        tactical_only = False
+        if depth <= 0:
+            my_map = self._threat_map(to_move)
+            opp_map = self._threat_map(opp)
+            forcing = any(len(wins) >= 2 for wins in my_map.values()) \
+                or any(len(wins) >= 2 for wins in opp_map.values()) \
+                or bool(my_map)
+            if extension <= 0 or not forcing:
+                return self._evaluate_position(to_move)
+            tactical_only = True
+
+        moves = self._candidate_moves(
+            to_move, depth, tactical_only=tactical_only, tt_move=tt_move)
+        if tactical_only:
+            moves = moves[:10]
+        if not moves:
+            return 0
+
+        best = LOSS
+        best_move = moves[0]
+        for move in moves:
+            self._check_time()
+            self._play(move, to_move)
+            try:
+                if depth > 0:
+                    value = -self._negamax(depth - 1, -beta, -alpha,
+                                           opp, extension)
+                else:
+                    value = -self._negamax(0, -beta, -alpha,
+                                           opp, extension - 1)
+            finally:
+                self._unplay(move, to_move)
+            if value > best:
+                best, best_move = value, move
+            alpha = max(alpha, value)
+            if alpha >= beta:
+                break
+
+        if depth > 0:
+            if best <= alpha_start:
+                flag = self.TT_UPPER
+            elif best >= beta:
+                flag = self.TT_LOWER
+            else:
+                flag = self.TT_EXACT
+            self._tt[tt_key] = (depth, best, flag, best_move)
+        return best
+
+    def _search_root(self, depth, moves):
+        alpha = LOSS
+        beta = WIN
+        best_score = LOSS
+        best_move = moves[0]
+        # 上一层根节点最佳走法优先搜索。
+        tt_entry = self._tt.get((self._hash, self.color))
+        if tt_entry and tt_entry[3] in moves:
+            preferred = tt_entry[3]
+            moves = [preferred] + [m for m in moves if m != preferred]
+
+        for move in moves:
+            self._check_time()
+            self._play(move, self.color)
+            try:
+                value = -self._negamax(depth - 1, -beta, -alpha,
+                                       self.opp, extension=4)
+            finally:
+                self._unplay(move, self.color)
+            if value > best_score:
+                best_score, best_move = value, move
+            alpha = max(alpha, value)
+            if value >= WIN:
+                break
+        self._tt[(self._hash, self.color)] = (
+            depth, best_score, self.TT_EXACT, best_move)
+        return best_move, best_score
+
+    def choose_move(self):
+        """在时间预算内返回最后一次完整搜索得到的最佳落子。"""
+        started = time.perf_counter()
+        self._deadline = started + max(0.01, self.time_budget)
+        self._hash = self._compute_hash()
+        self._nodes = 0
+        self._tt_hits = 0
+        self._analysis_cache = {}
+        self._threat_map_cache = {}
+        self._tt = {}
+
+        fallback = self._any_empty()
+        if fallback is None:
+            return None
+
+        try:
+            mine = self._color_analysis(self.color)
+            if mine.threats:
+                best = mine.threats[0]
+                self._finish_stats(started, 0, WIN)
+                return best
+            theirs = self._color_analysis(self.opp)
+            if len(theirs.threats) == 1:
+                best = theirs.threats[0]
+                self._finish_stats(started, 0, 0)
+                return best
+            if len(theirs.threats) >= 2:
+                # 理论败势：至少堵住一个，延长对局并等待对手失误。
+                best = theirs.threats[0]
+                self._finish_stats(started, 0, LOSS)
+                return best
+
+            root_moves = self._candidate_moves(
+                self.color, depth=1, root=True)
+            if not root_moves:
+                self._finish_stats(started, 0, 0)
+                return fallback
+            completed_move = root_moves[0]
+            completed_score = LOSS
+            completed_depth = 0
+
+            for depth in range(1, self.max_depth + 1):
+                self._check_time()
+                move, score = self._search_root(depth, root_moves)
+                completed_move = move
+                completed_score = score
+                completed_depth = depth
+                # 已证明必胜，无需继续消耗时间。
+                if score >= WIN:
+                    break
+            self._finish_stats(started, completed_depth, completed_score)
+            return completed_move
+        except _SearchTimeout:
+            # 当前迭代没有完成，只使用上一层完整结果。
+            if 'completed_move' not in locals():
+                completed_move = fallback
+                completed_depth = 0
+                completed_score = 0
+            self._finish_stats(started, completed_depth, completed_score)
+            return completed_move
+
+    def _finish_stats(self, started, depth, score):
+        self.last_stats = {
+            'completed_depth': depth,
+            'nodes': self._nodes,
+            'tt_hits': self._tt_hits,
+            'elapsed': time.perf_counter() - started,
+            'score': score,
+        }
