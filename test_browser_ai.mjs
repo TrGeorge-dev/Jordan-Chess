@@ -19,6 +19,17 @@ function sameMove(a, b) {
   return a[0] === b[0] && a[1] === b[1];
 }
 
+// 用户报告的“三子一排”陷阱：一侧已封，必须占住另一侧的双将点。
+{
+  const game = new JordanChess(10);
+  for (const [x,y] of [[4,4],[5,4],[6,4]]) game.board[x][y] = BLACK;
+  game.board[5][3] = WHITE;
+  game.turn = WHITE;
+  game.history = [[4,4,BLACK],[5,3,WHITE],[5,4,BLACK],[0,0,WHITE],[6,4,BLACK]];
+  const ai = new JordanAI(game, WHITE, 0.2, 8, 1);
+  assert.ok(sameMove(ai.chooseMove(), [5,5]));
+}
+
 // 立即获胜。
 {
   const game = new JordanChess(10);
@@ -72,4 +83,4 @@ function sameMove(a, b) {
   assert.equal(game.board[move[0]][move[1]], EMPTY);
 }
 
-console.log('浏览器 AI: 4 项测试全部通过');
+console.log('浏览器 AI: 5 项测试全部通过');

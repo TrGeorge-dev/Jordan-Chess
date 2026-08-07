@@ -27,15 +27,19 @@
 ```
 jordan-chess/
 ├── engine.py        核心引擎（纯 Python，无依赖）—— 棋盘/连通性/环路检测/胜负结算/悔棋
-├── ai.py            第二代 AI（完整威胁推理 + 迭代加深搜索，纯 Python）
+├── ai.py            默认混合 AI（与 HTML 同步）+ 迁移前完整威胁 AI
 ├── cli.py           命令行版（python3 cli.py [大小] [--ai]）
 ├── gui.py           pygame 图形界面版（pip install pygame，python3 gui.py [大小]）
 ├── index.html       浏览器版（单文件，自适应移动端，含 AI）
 ├── test_engine.py   引擎自测（python3 test_engine.py [-v]）
 ├── test_ai.py       AI 自测（python3 test_ai.py [-v]）
 ├── test_browser_ai.mjs  浏览器 AI 无头自测（Node.js，可选）
+├── test_cross_language_ai.py  Python/HTML 逐项同步测试
 ├── benchmark_ai.py  新旧 AI 成对换色对战，输出 CSV/JSON
+├── benchmark_html_port.py  HTML 迁移版与旧 Python AI 成对换色对战
 ├── plot_benchmark.py 对战数据生成 SVG 图（无第三方依赖）
+├── plot_html_port_results.py  多棋盘对战汇总并生成 PNG/SVG
+├── html_ai_bridge.mjs  测试时调用 index.html 真实 AI
 └── README.md
 ```
 
@@ -56,18 +60,18 @@ python3 gui.py --ai          # 或运行时点按钮
 # 浏览器版: 点「人机」+「执黑/执白」选边
 ```
 
-**AI 算法**（ai.py，关键战术与搜索逻辑同步进 index.html）
+**AI 算法**（`JordanAI` 在 Python/HTML 中保持同步）
 
 威胁体系（成环 = 落子即构成约当曲线立即获胜）：
 - **T1 一步威胁**：某空点落子即成环。AI 必走/必堵（永不错过直接胜负）。
 - **T2 两步威胁**：落子后产生 1 个 T1，迫使对手应对（争夺先手）。
 - **fork 双威胁**：落子后产生 ≥2 个 T1。对手只能堵一个 → **两步内必胜**；AI 会主动制造 fork 并抢占对手的 fork 点。
 
-决策流程：己方 T1 → 堵对方唯一 T1 → 比较全部 fork/T2 进攻、防守和反击 → 迭代加深 α-β 搜索。搜索先完整看 1 层，再逐层加深；时间到时丢弃未完成层，只使用最后一层完整结果。相同局面通过置换表复用，深度边界仍有强制威胁时会继续有限延伸。
+决策流程：己方 T1 → 堵对方唯一 T1 → 比较 fork/T2 进攻、防守和反击 → 从约 14 个重点候选位置逐层加深搜索。叶面评分综合连接潜力、活动空间和棋形结构；时间到时丢弃未完成层，只使用最后一层完整结果。相同局面通过置换表复用，深度边界仍有强制威胁时会继续有限延伸。
 
-威胁判定核心：空点 v 的两个同色邻居在同一连通分量（并查集 O(1)）⟺ 落 v 即成环——与引擎的环路检测（逐对 BFS）完全等价。第二代 AI 也会检查只连接 1 枚己子的延伸走法，因为它仍可能在新棋旁边制造 T1；旧版会漏掉此类战术。Python 与浏览器版均按时间预算逐层加深，默认最多搜索 8 层，小棋盘和强制走法通常更快。
+威胁判定核心：空点 v 的两个同色邻居在同一连通分量（并查集 O(1)）⟺ 落 v 即成环——与引擎的环路检测（逐对 BFS）完全等价。AI 也会检查只连接 1 枚己子的延伸走法，因为它仍可能在新棋旁边制造 T1。Python 与浏览器版均按时间预算逐层加深，默认最多搜索 8 层。迁移前的完整威胁版保留为 `ThreatJordanAI`，用于回归和强度对比。
 
-**自测**：`python3 test_ai.py` 11 项，新增单邻居 T2、多 fork 防守和超时恢复测试；浏览器 AI 可用 `node test_browser_ai.mjs` 运行 4 项无头测试。
+**自测**：`python3 test_ai.py` 11 项；浏览器 AI 可用 `node test_browser_ai.mjs` 运行 5 项无头测试。`python3 test_cross_language_ai.py` 会核对两端的 T1、T2、fork、评分、候选顺序和固定深度搜索结果，防止再次出现只同步部分逻辑的问题。
 
 **新旧 AI 对战与可视化**：每个开局走两盘并交换黑白，双方使用相同单步时间上限，避免先手优势误导结果。
 
@@ -78,6 +82,13 @@ python3 plot_benchmark.py benchmark-output/ai_benchmark_games.csv \
 ```
 
 输出包括逐盘 CSV、汇总 JSON 和可直接用浏览器打开的 SVG 图。
+
+HTML 迁移版 Python AI 与迁移前 Python AI 的换色对战：
+
+```bash
+python3 benchmark_html_port.py --pairs 12 --size 10 --budget 0.12 \
+  --output-dir benchmark-output
+```
 
 ## 启动方式
 

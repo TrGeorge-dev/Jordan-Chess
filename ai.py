@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-约当棋 AI 对手 —— 基于威胁推理 + α-β 剪枝
-==========================================
+约当棋 AI 对手 —— HTML 同步版 + 威胁搜索实验版
+=============================================
 
 【威胁体系】(成环 = 落子即构成约当曲线, 立即获胜)
   T1   一步威胁: 某空点落子即成环。轮到自己走 = 直接获胜; 轮到对手 = 必须堵。
@@ -13,10 +13,11 @@
   (用并查集 O(1) 判定; 与引擎的环路检测"每对邻居 BFS 连通"完全等价,
    因为 v 为空点, 邻居间的连通路径必然不经过 v)。
 
-【搜索】根节点做精确 T1/T2/fork 攻防推理并排序候选;
-  内层 α-β 剪枝 + 强制走法(对手有 T1 必须堵, 分支骤减);
-  叶子用威胁差 + 结构评估; 时间预算控制搜索宽度, 超时返回当前最佳。
-  AI 只读棋盘并自行模拟, 不产生任何副作用。
+【默认 JordanAI】与 index.html 保持同一套候选生成、结构评分、
+  迭代加深、α-β 剪枝和战术延伸规则。
+
+【ThreatJordanAI】保留此前 Python 的完整威胁搜索版本，便于回归对战。
+  两个 AI 都只读棋盘并自行模拟，不产生任何副作用。
 """
 
 import random
@@ -486,7 +487,7 @@ class _ColorAnalysis:
     component_sizes: tuple
 
 
-class JordanAI(LegacyJordanAI):
+class ThreatJordanAI(LegacyJordanAI):
     """约当棋第二代 AI：完整威胁识别 + 迭代加深 α-β 搜索。
 
     与旧版相比：
@@ -993,3 +994,389 @@ class JordanAI(LegacyJordanAI):
             'elapsed': time.perf_counter() - started,
             'score': score,
         }
+
+
+# ============================================================================
+# 默认 AI：与 index.html 同步的混合版
+# ============================================================================
+
+
+class JordanAI(LegacyJordanAI):
+    """浏览器 AI 的 Python 同步版。
+
+    保留 HTML 版在实战中更有效的轻量棋形评分和窄候选搜索，同时补齐：
+      * 单邻居延伸 T2/fork 检测；
+      * 逐层加深，只采用完整搜索完的一层；
+      * 置换表和强制战术延伸；
+      * 超时后可靠恢复棋盘。
+
+    `ThreatJordanAI` 保留迁移前的完整威胁版，供回归和强度对比。
+    """
+
+    TT_EXACT = 0
+    TT_LOWER = 1
+    TT_UPPER = 2
+
+    def __init__(self, game, color, time_budget=2.0, max_depth=8, seed=None):
+        super().__init__(game, color, time_budget=time_budget,
+                         max_depth=max_depth, seed=seed)
+        self._tt = {}
+        self._nodes = 0
+        self._tt_hits = 0
+        self.last_stats = {
+            'completed_depth': 0,
+            'nodes': 0,
+            'tt_hits': 0,
+            'elapsed': 0.0,
+            'score': 0,
+        }
+
+    # ------------------------------------------------------------------
+    # 与 HTML 对齐的基础工具
+    # ------------------------------------------------------------------
+    def _check_time(self):
+        if self._deadline > 0 and time.perf_counter() >= self._deadline:
+            raise _SearchTimeout
+
+    def _state_key(self, to_move):
+        board_key = bytes(cell for row in self.game.board for cell in row)
+        return to_move, board_key
+
+    def _board_full(self):
+        return all(cell != EMPTY for row in self.game.board for cell in row)
+
+    def _threats(self, color, limit=None):
+        """与 HTML 一样，达到 limit 后立即返回，不继续扫描棋盘。"""
+        n = self.game.n
+        b = self.game.board
+        dsu = self._build_dsu(color)
+        idx = self._idx
+        result = []
+        for x in range(n):
+            for y in range(n):
+                if b[x][y] != EMPTY:
+                    continue
+                neighbors = []
+                if x > 0 and b[x - 1][y] == color:
+                    neighbors.append(idx(x - 1, y))
+                if x < n - 1 and b[x + 1][y] == color:
+                    neighbors.append(idx(x + 1, y))
+                if y > 0 and b[x][y - 1] == color:
+                    neighbors.append(idx(x, y - 1))
+                if y < n - 1 and b[x][y + 1] == color:
+                    neighbors.append(idx(x, y + 1))
+                if len(neighbors) < 2:
+                    continue
+                hit = False
+                for i in range(len(neighbors) - 1):
+                    root = dsu.find(neighbors[i])
+                    for j in range(i + 1, len(neighbors)):
+                        if root == dsu.find(neighbors[j]):
+                            hit = True
+                            break
+                    if hit:
+                        break
+                if hit:
+                    result.append((x, y))
+                    if limit is not None and len(result) >= limit:
+                        return result
+        return result
+
+    # ------------------------------------------------------------------
+    # HTML 的完整战术预计算
+    # ------------------------------------------------------------------
+    def _t2_and_forks(self, color):
+        """检查所有至少接触一枚同色棋子的空点，和 HTML 完全一致。"""
+        n = self.game.n
+        b = self.game.board
+        candidates = []
+        for x in range(n):
+            for y in range(n):
+                if b[x][y] != EMPTY:
+                    continue
+                count = 0
+                if x > 0 and b[x - 1][y] == color: count += 1
+                if x < n - 1 and b[x + 1][y] == color: count += 1
+                if y > 0 and b[x][y - 1] == color: count += 1
+                if y < n - 1 and b[x][y + 1] == color: count += 1
+                if count >= 1:
+                    candidates.append((x, y))
+
+        t2, forks = [], []
+        for move in candidates:
+            self._check_time()
+            x, y = move
+            b[x][y] = color
+            try:
+                threats = self._threats(color, limit=3)
+            finally:
+                b[x][y] = EMPTY
+            if len(threats) >= 2:
+                forks.append(move)
+            elif len(threats) == 1:
+                t2.append(move)
+        return t2, forks
+
+    # ------------------------------------------------------------------
+    # HTML 的候选位置排序
+    # ------------------------------------------------------------------
+    def _gen_moves(self, color, top=14):
+        n = self.game.n
+        b = self.game.board
+        opp = WHITE if color == BLACK else BLACK
+        scored = []
+        for x in range(n):
+            for y in range(n):
+                if b[x][y] != EMPTY:
+                    continue
+                mine = theirs = 0
+                if x > 0:
+                    c = b[x - 1][y]
+                    if c == color: mine += 1
+                    elif c == opp: theirs += 1
+                if x < n - 1:
+                    c = b[x + 1][y]
+                    if c == color: mine += 1
+                    elif c == opp: theirs += 1
+                if y > 0:
+                    c = b[x][y - 1]
+                    if c == color: mine += 1
+                    elif c == opp: theirs += 1
+                if y < n - 1:
+                    c = b[x][y + 1]
+                    if c == color: mine += 1
+                    elif c == opp: theirs += 1
+                if mine == 0 and theirs == 0:
+                    continue
+                centrality = 0.3 * (
+                    n - abs(2 * x - (n - 1))
+                    + n - abs(2 * y - (n - 1)))
+                scored.append((mine * 5 + theirs * 3 + centrality,
+                               (x, y)))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [move for _, move in scored[:top]]
+
+    def _root_candidates(self, t2m, fm, t2o, fo):
+        n = self.game.n
+        b = self.game.board
+        tactical = {}
+        quiet = {}
+
+        def put(pool, move, score):
+            if move not in pool or pool[move] < score:
+                pool[move] = score
+
+        for move in fm: put(tactical, move, 5000)
+        for move in fo: put(tactical, move, 4600)
+        for move in t2m: put(tactical, move, 3000)
+        for move in t2o: put(tactical, move, 2800)
+
+        for x in range(n):
+            for y in range(n):
+                c = b[x][y]
+                if c == EMPTY:
+                    continue
+                base = 1200 if c == self.color else 800
+                for nx, ny in ((x - 1, y), (x + 1, y),
+                               (x, y - 1), (x, y + 1)):
+                    move = (nx, ny)
+                    if not (0 <= nx < n and 0 <= ny < n):
+                        continue
+                    if b[nx][ny] != EMPTY or move in tactical:
+                        continue
+                    put(quiet, move, base)
+
+        center = (n - 1) / 2.0
+
+        def rank(pool):
+            values = [
+                (score + 20 * (n - abs(move[0] - center)
+                               - abs(move[1] - center)), move, score)
+                for move, score in pool.items()
+            ]
+            values.sort(key=lambda item: (-item[0], item[1]))
+            return values
+
+        forced = rank(tactical)
+        room = max(0, self._cand_limit - len(forced))
+        normal = rank(quiet)[:room]
+        return [(move, score) for _, move, score in forced + normal]
+
+    def _tactical_candidates(self, to_move):
+        opp = WHITE if to_move == BLACK else BLACK
+        mine = self._t2_and_forks(to_move)
+        theirs = self._t2_and_forks(opp)
+        values = {}
+
+        def put(move, score):
+            if move not in values or values[move] < score:
+                values[move] = score
+
+        for move in mine[1]: put(move, 5000)
+        for move in theirs[1]: put(move, 4600)
+        for move in mine[0]: put(move, 3000)
+        for move in theirs[0]: put(move, 2800)
+        return [move for move, _ in sorted(
+            values.items(), key=lambda item: (-item[1], item[0]))]
+
+    # ------------------------------------------------------------------
+    # 与 HTML 对齐的逐层加深搜索
+    # ------------------------------------------------------------------
+    def _negamax(self, depth, alpha, beta, to_move, extension=3):
+        self._nodes += 1
+        self._check_time()
+        alpha_start, beta_start = alpha, beta
+        if self._threats(to_move, limit=1):
+            return WIN
+        opp = WHITE if to_move == BLACK else BLACK
+        opponent_wins = self._threats(opp, limit=2)
+        if len(opponent_wins) >= 2:
+            return LOSS
+        if self._board_full():
+            return 0
+
+        key = self._state_key(to_move)
+        entry = self._tt.get(key)
+        tt_move = None
+        if entry is not None:
+            tt_depth, tt_score, tt_flag, tt_move = entry
+            if tt_depth >= depth and depth > 0:
+                self._tt_hits += 1
+                if tt_flag == self.TT_EXACT:
+                    return tt_score
+                if tt_flag == self.TT_LOWER:
+                    alpha = max(alpha, tt_score)
+                else:
+                    beta = min(beta, tt_score)
+                if alpha >= beta:
+                    return tt_score
+
+        next_depth = depth - 1
+        next_extension = extension
+        if len(opponent_wins) == 1:
+            moves = [opponent_wins[0]]
+        elif depth <= 0:
+            if extension <= 0:
+                return self._evaluate(to_move)
+            moves = self._tactical_candidates(to_move)[:10]
+            if not moves:
+                return self._evaluate(to_move)
+            next_depth = 0
+            next_extension = extension - 1
+        else:
+            moves = self._gen_moves(to_move, top=self._cand_limit)
+        if not moves:
+            return 0
+
+        if tt_move in moves:
+            moves = [tt_move] + [move for move in moves if move != tt_move]
+
+        best = LOSS
+        best_move = moves[0]
+        for move in moves:
+            self._check_time()
+            x, y = move
+            self.game.board[x][y] = to_move
+            try:
+                value = -self._negamax(
+                    next_depth, -beta, -alpha, opp, next_extension)
+            finally:
+                self.game.board[x][y] = EMPTY
+            if value > best:
+                best, best_move = value, move
+            alpha = max(alpha, value)
+            if alpha >= beta:
+                break
+
+        if depth > 0:
+            flag = (self.TT_UPPER if best <= alpha_start else
+                    self.TT_LOWER if best >= beta_start else self.TT_EXACT)
+            self._tt[key] = (depth, best, flag, best_move)
+        return best
+
+    def _search_root(self, depth, candidates):
+        moves = [item[0] for item in candidates]
+        root_key = self._state_key(self.color)
+        entry = self._tt.get(root_key)
+        if entry is not None and entry[3] in moves:
+            preferred = entry[3]
+            moves = [preferred] + [move for move in moves
+                                   if move != preferred]
+
+        alpha = LOSS
+        best_score = LOSS
+        best_move = moves[0]
+        for move in moves:
+            self._check_time()
+            x, y = move
+            self.game.board[x][y] = self.color
+            try:
+                value = -self._negamax(
+                    depth - 1, LOSS, -alpha, self.opp, extension=3)
+            finally:
+                self.game.board[x][y] = EMPTY
+            if value > best_score:
+                best_score, best_move = value, move
+            alpha = max(alpha, value)
+            if value >= WIN:
+                break
+        self._tt[root_key] = (
+            depth, best_score, self.TT_EXACT, best_move)
+        return best_move, best_score
+
+    def choose_move(self):
+        started = time.perf_counter()
+        self._deadline = started + max(0.01, self.time_budget)
+        self._tt = {}
+        self._nodes = 0
+        self._tt_hits = 0
+        fallback = self._any_empty()
+        if fallback is None:
+            return None
+        completed_move = fallback
+        completed_depth = 0
+        completed_score = 0
+
+        try:
+            mine = self._threats(self.color, limit=1)
+            if mine:
+                completed_move = mine[0]
+                completed_score = WIN
+            else:
+                theirs = self._threats(self.opp, limit=3)
+                if len(theirs) == 1:
+                    completed_move = theirs[0]
+                elif len(theirs) >= 2:
+                    completed_move = theirs[0]
+                    completed_score = LOSS
+                else:
+                    t2m, fm = self._t2_and_forks(self.color)
+                    t2o, fo = self._t2_and_forks(self.opp)
+                    if fm:
+                        completed_move = fm[0]
+                        completed_score = WIN
+                    else:
+                        candidates = self._root_candidates(
+                            t2m, fm, t2o, fo)
+                        if candidates:
+                            completed_move = candidates[0][0]
+                            for depth in range(1, self.max_depth + 1):
+                                self._check_time()
+                                move, score = self._search_root(
+                                    depth, candidates)
+                                completed_move = move
+                                completed_score = score
+                                completed_depth = depth
+                                if completed_score >= WIN:
+                                    break
+        except _SearchTimeout:
+            pass
+
+        self.last_stats = {
+            'completed_depth': completed_depth,
+            'nodes': self._nodes,
+            'tt_hits': self._tt_hits,
+            'elapsed': time.perf_counter() - started,
+            'score': completed_score,
+        }
+        return completed_move
