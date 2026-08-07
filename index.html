@@ -472,7 +472,7 @@ class LegacyJordanAI {
 
 const AI_TIMEOUT_V2 = Symbol("ai-timeout-v2");
 
-class JordanAI extends LegacyJordanAI {
+class HybridJordanAI extends LegacyJordanAI {
   constructor(game, color, timeBudget = 1.2, maxDepth = 8, seed = 1) {
     super(game, color, timeBudget, maxDepth, seed);
     this._tt = new Map();
@@ -741,6 +741,469 @@ class JordanAI extends LegacyJordanAI {
   }
 }
 
+// ================= V3: 增量连通状态 + PVS =================
+const V3_MATE = 1000000, V3_INF = 1100000;
+const AI_TIMEOUT_V3 = Symbol("ai-timeout-v3");
+
+class RollbackDSUV3 {
+  constructor(count) {
+    this.parent = Array(count).fill(-1);
+    this.size = Array(count).fill(0);
+    this.stack = [];
+  }
+  find(item) {
+    while (this.parent[item] !== item) item = this.parent[item];
+    return item;
+  }
+  snapshot() { return this.stack.length; }
+  activate(item) {
+    this.stack.push(["a", item]);
+    this.parent[item] = item; this.size[item] = 1;
+  }
+  union(first, second) {
+    let a=this.find(first), b=this.find(second);
+    if (a===b) return false;
+    if (this.size[a] < this.size[b]) [a,b]=[b,a];
+    this.stack.push(["u",b,a,this.size[a]]);
+    this.parent[b]=a; this.size[a]+=this.size[b];
+    return true;
+  }
+  rollback(snapshot) {
+    while (this.stack.length > snapshot) {
+      const event=this.stack.pop();
+      if (event[0]==="a") {
+        this.parent[event[1]]=-1; this.size[event[1]]=0;
+      } else {
+        const [,child,root,oldSize]=event;
+        this.parent[child]=child; this.size[root]=oldSize;
+      }
+    }
+  }
+  clearHistory() { this.stack=[]; }
+}
+
+class SearchStateV3 {
+  constructor(game) {
+    this.size=game.size; this.n=game.n; this.count=this.n*this.n;
+    this.board=[];
+    for (let x=0;x<this.n;x++) for (let y=0;y<this.n;y++)
+      this.board.push(game.board[x][y]);
+    this.emptyCount=this.board.filter(v=>v===EMPTY).length;
+    this.dsu={};
+    this.dsu[BLACK]=new RollbackDSUV3(this.count);
+    this.dsu[WHITE]=new RollbackDSUV3(this.count);
+    this.neighbors=Array.from({length:this.count},(_,i)=>this._neighbors(i));
+    this.zobrist=this._makeZobrist(); this.hash=0n;
+    this._buildComponents();
+  }
+  _neighbors(index) {
+    const x=Math.floor(index/this.n), y=index%this.n, out=[];
+    if (x>0) out.push(index-this.n);
+    if (x+1<this.n) out.push(index+this.n);
+    if (y>0) out.push(index-1);
+    if (y+1<this.n) out.push(index+1);
+    return out;
+  }
+  _makeZobrist() {
+    const mask=(1n<<64n)-1n;
+    let value=(0x4a4f5244414en ^ BigInt(this.n)) & mask;
+    const next=()=>{
+      value=(value+0x9e3779b97f4a7c15n)&mask;
+      let z=value;
+      z=((z^(z>>30n))*0xbf58476d1ce4e5b9n)&mask;
+      z=((z^(z>>27n))*0x94d049bb133111ebn)&mask;
+      return (z^(z>>31n))&mask;
+    };
+    return Array.from({length:this.count},()=>[next(),next()]);
+  }
+  _buildComponents() {
+    for (let i=0;i<this.count;i++) {
+      const color=this.board[i]; if (color===EMPTY) continue;
+      this.dsu[color].activate(i); this.hash^=this.zobrist[i][color-1];
+    }
+    for (let i=0;i<this.count;i++) {
+      const color=this.board[i]; if (color===EMPTY) continue;
+      const x=Math.floor(i/this.n), y=i%this.n;
+      if (x+1<this.n && this.board[i+this.n]===color)
+        this.dsu[color].union(i,i+this.n);
+      if (y+1<this.n && this.board[i+1]===color)
+        this.dsu[color].union(i,i+1);
+    }
+    this.dsu[BLACK].clearHistory(); this.dsu[WHITE].clearHistory();
+  }
+  xy(index) { return [Math.floor(index/this.n),index%this.n]; }
+  index(move) { return move[0]*this.n+move[1]; }
+  sameColorRoots(move,color) {
+    const dsu=this.dsu[color], roots=[];
+    for (const nb of this.neighbors[move])
+      if (this.board[nb]===color) roots.push(dsu.find(nb));
+    return roots;
+  }
+  isWinningMove(move,color) {
+    if (this.board[move]!==EMPTY) return false;
+    const roots=this.sameColorRoots(move,color);
+    return roots.length!==new Set(roots).size;
+  }
+  winningMoves(color,limit=null) {
+    const out=[];
+    for (let move=0;move<this.count;move++) {
+      if (this.board[move]===EMPTY && this.isWinningMove(move,color)) {
+        out.push(move); if (limit!==null && out.length>=limit) break;
+      }
+    }
+    return out;
+  }
+  play(move,color) {
+    if (this.board[move]!==EMPTY) throw new Error("occupied V3 move");
+    const dsu=this.dsu[color], snapshot=dsu.snapshot();
+    const roots=this.sameColorRoots(move,color);
+    const won=roots.length!==new Set(roots).size;
+    this.board[move]=color; this.emptyCount--;
+    this.hash^=this.zobrist[move][color-1]; dsu.activate(move);
+    for (const nb of this.neighbors[move])
+      if (this.board[nb]===color) dsu.union(move,nb);
+    return {move,color,snapshot,won};
+  }
+  undo(token) {
+    this.dsu[token.color].rollback(token.snapshot);
+    this.hash^=this.zobrist[token.move][token.color-1];
+    this.board[token.move]=EMPTY; this.emptyCount++;
+  }
+  frontierMoves() {
+    const out=[];
+    for (let move=0;move<this.count;move++) {
+      if (this.board[move]!==EMPTY) continue;
+      if (this.neighbors[move].some(nb=>this.board[nb]!==EMPTY)) out.push(move);
+    }
+    return out;
+  }
+}
+
+class JordanAI {
+  constructor(game,color,timeBudget=2.0,maxDepth=12,seed=1) {
+    this.game=game; this.color=color;
+    this.opp=(color===BLACK?WHITE:BLACK);
+    this.timeBudget=timeBudget; this.maxDepth=maxDepth; this.seed=seed;
+    this.weights={fork:18000,t2:620,mergePoint:170,frontierEdge:26,
+      componentSquare:3,largestComponent:8,openSquareOne:10,
+      openSquareTwo:210,center:1};
+    this.historyScores=Array.from({length:3},()=>Array(game.n*game.n).fill(0));
+    this.lastStats={completedDepth:0,nodes:0,ttHits:0,cutoffs:0,
+      elapsed:0,score:0,pv:[]};
+  }
+  static other(color) { return color===BLACK?WHITE:BLACK; }
+  _key(color) { return this.state.hash.toString(16)+"|"+color; }
+  _checkTime() {
+    if (performance.now()>=this.deadline) throw AI_TIMEOUT_V3;
+  }
+  _prepare() {
+    this.state=new SearchStateV3(this.game);
+    this.tt=new Map(); this.analysisCache=new Map();
+    this.tacticalCache=new Map(); this.featureCache=new Map();
+    this.killers=new Map(); this.nodes=0; this.ttHits=0; this.cutoffs=0;
+  }
+  _analysis(color) {
+    const key=this._key(color);
+    if (this.analysisCache.has(key)) return this.analysisCache.get(key);
+    const dsu=this.state.dsu[color], componentSizes=new Map();
+    for (let move=0;move<this.state.count;move++) if (this.state.board[move]===color) {
+      const root=dsu.find(move);
+      componentSizes.set(root,(componentSizes.get(root)||0)+1);
+    }
+    const threats=[], moveRoots=new Map(), frontiers=new Map();
+    for (let move=0;move<this.state.count;move++) {
+      if (this.state.board[move]!==EMPTY) continue;
+      const roots=[];
+      for (const nb of this.state.neighbors[move])
+        if (this.state.board[nb]===color) roots.push(dsu.find(nb));
+      const unique=[...new Set(roots)].sort((a,b)=>a-b);
+      moveRoots.set(move,unique);
+      if (unique.length<roots.length) threats.push(move);
+      for (const root of unique) {
+        if (!frontiers.has(root)) frontiers.set(root,new Set());
+        frontiers.get(root).add(move);
+      }
+    }
+    const sizes=[...componentSizes.values()].sort((a,b)=>b-a);
+    const result={threats,moveRoots,frontiers,componentSizes:sizes};
+    this.analysisCache.set(key,result); return result;
+  }
+  _winningMoves(color,limit=null) {
+    const threats=this._analysis(color).threats;
+    return limit===null?threats:threats.slice(0,limit);
+  }
+  _tacticalMap(color) {
+    const key=this._key(color);
+    if (this.tacticalCache.has(key)) return this.tacticalCache.get(key);
+    const analysis=this._analysis(color), result=new Map();
+    if (analysis.threats.length) { this.tacticalCache.set(key,result); return result; }
+    for (const [move,joinedRoots] of analysis.moveRoots) {
+      this._checkTime(); if (!joinedRoots.length) continue;
+      const created=new Set();
+      if (joinedRoots.length>=2) for (let i=0;i<joinedRoots.length-1;i++)
+        for (let j=i+1;j<joinedRoots.length;j++) {
+          const a=analysis.frontiers.get(joinedRoots[i])||new Set();
+          const b=analysis.frontiers.get(joinedRoots[j])||new Set();
+          for (const point of a) if (b.has(point)) created.add(point);
+        }
+      const joined=new Set(joinedRoots);
+      for (const nb of this.state.neighbors[move]) {
+        if (this.state.board[nb]!==EMPTY) continue;
+        const roots=analysis.moveRoots.get(nb)||[];
+        if (roots.some(root=>joined.has(root))) created.add(nb);
+      }
+      created.delete(move);
+      if (created.size) result.set(move,[...created].sort((a,b)=>a-b));
+    }
+    this.tacticalCache.set(key,result); return result;
+  }
+
+  _features(color) {
+    const key=this._key(color);
+    if (this.featureCache.has(key)) return this.featureCache.get(key);
+    const opp=JordanAI.other(color), analysis=this._analysis(color);
+    const tactical=this._tacticalMap(color);
+    let forks=0;
+    for (const wins of tactical.values()) if (wins.length>=2) forks++;
+    const t2=tactical.size-forks;
+    let mergePoints=0, frontierEdges=0, centerScore=0;
+    const center=(this.state.n-1)/2;
+    for (let move=0;move<this.state.count;move++) {
+      const value=this.state.board[move];
+      if (value===EMPTY) {
+        const roots=analysis.moveRoots.get(move)||[];
+        if (roots.length>=2) mergePoints++;
+        for (const nb of this.state.neighbors[move])
+          if (this.state.board[nb]===color) frontierEdges++;
+      } else if (value===color) {
+        const [x,y]=this.state.xy(move);
+        centerScore+=Math.trunc(2*this.state.n-Math.abs(x-center)-Math.abs(y-center));
+      }
+    }
+    let componentSquare=0;
+    for (const size of analysis.componentSizes) componentSquare+=size*size;
+    const largestComponent=analysis.componentSizes.length?analysis.componentSizes[0]:0;
+    let openSquareOne=0, openSquareTwo=0;
+    const n=this.state.n, board=this.state.board;
+    for (let x=0;x<n-1;x++) for (let y=0;y<n-1;y++) {
+      const base=x*n+y;
+      const values=[board[base],board[base+n],board[base+1],board[base+n+1]];
+      if (values.includes(opp)) continue;
+      const count=values.filter(v=>v===color).length;
+      if (count===1) openSquareOne++;
+      else if (count===2) openSquareTwo++;
+    }
+    const result={forks,t2,mergePoints,frontierEdges,componentSquare,
+      largestComponent,openSquareOne,openSquareTwo,center:centerScore};
+    this.featureCache.set(key,result); return result;
+  }
+  _weighted(f) {
+    const w=this.weights;
+    return f.forks*w.fork+f.t2*w.t2+f.mergePoints*w.mergePoint+
+      f.frontierEdges*w.frontierEdge+f.componentSquare*w.componentSquare+
+      f.largestComponent*w.largestComponent+f.openSquareOne*w.openSquareOne+
+      f.openSquareTwo*w.openSquareTwo+f.center*w.center;
+  }
+  _evaluate(color) {
+    return this._weighted(this._features(color))-
+      this._weighted(this._features(JordanAI.other(color)));
+  }
+  _positionalOrder(move,color) {
+    const opponent=JordanAI.other(color);
+    const mine=this.state.sameColorRoots(move,color).length;
+    const theirs=this.state.sameColorRoots(move,opponent).length;
+    const [x,y]=this.state.xy(move), center=(this.state.n-1)/2;
+    const centrality=Math.trunc(4*this.state.n-2*Math.abs(x-center)-2*Math.abs(y-center));
+    let squareGain=0, n=this.state.n;
+    for (const sx of [x-1,x]) for (const sy of [y-1,y]) {
+      if (sx<0||sx>=n-1||sy<0||sy>=n-1) continue;
+      const points=[sx*n+sy,(sx+1)*n+sy,sx*n+sy+1,(sx+1)*n+sy+1];
+      const values=points.map(p=>this.state.board[p]);
+      if (!values.includes(opponent)) squareGain+=16*values.filter(v=>v===color).length;
+      if (!values.includes(color)) squareGain+=13*values.filter(v=>v===opponent).length;
+    }
+    return 60*mine+42*theirs+centrality+squareGain;
+  }
+  _orderedMoves(color,depth,ply,tacticalOnly=false,ttMove=null,root=false) {
+    const opponent=JordanAI.other(color);
+    const mine=this._tacticalMap(color), theirs=this._tacticalMap(opponent);
+    const scored=new Map();
+    const add=(move,score)=>{
+      if (this.state.board[move]===EMPTY)
+        scored.set(move,Math.max(scored.has(move)?scored.get(move):-V3_INF,score));
+    };
+    for (const [move,wins] of mine) add(move,wins.length>=2?700000:500000);
+    for (const [move,wins] of theirs) {
+      add(move,wins.length>=2?620000:430000);
+      if (wins.length>=2) for (const block of wins) add(block,390000);
+    }
+    if (!tacticalOnly) {
+      const frontier=new Set(this.state.frontierMoves());
+      if (root) {
+        const empties=[];
+        for (let move=0;move<this.state.count;move++)
+          if (this.state.board[move]===EMPTY) empties.push(move);
+        empties.sort((a,b)=>this._positionalOrder(b,color)-this._positionalOrder(a,color)||a-b);
+        for (const move of empties.slice(0,6)) frontier.add(move);
+      }
+      const quiet=[];
+      for (const move of frontier) if (!scored.has(move))
+        quiet.push([this._positionalOrder(move,color),move]);
+      quiet.sort((a,b)=>b[0]-a[0]||a[1]-b[1]);
+      const totalLimit=root?20:(depth>=6?10:(depth>=4?12:16));
+      const room=Math.max(0,totalLimit-scored.size);
+      for (const [score,move] of quiet.slice(0,room))
+        add(move,score+this.historyScores[color][move]);
+    }
+    const killers=this.killers.get(ply)||[];
+    killers.forEach((move,rank)=>{if(scored.has(move))scored.set(move,scored.get(move)+100000-rank*1000);});
+    if (ttMove!==null && scored.has(ttMove)) scored.set(ttMove,scored.get(ttMove)+1000000);
+    return [...scored.entries()].sort((a,b)=>b[1]-a[1]||a[0]-b[0]).map(item=>item[0]);
+  }
+  _recordCutoff(color,move,depth,ply) {
+    this.cutoffs++; this.historyScores[color][move]+=Math.max(1,depth*depth);
+    const killers=(this.killers.get(ply)||[]).filter(value=>value!==move);
+    killers.unshift(move); this.killers.set(ply,killers.slice(0,2));
+  }
+  _pvs(depth,alpha,beta,color,ply,qdepth=4) {
+    this.nodes++; this._checkTime();
+    const alphaStart=alpha, opponent=JordanAI.other(color);
+    if (this._winningMoves(color,1).length) return V3_MATE-ply;
+    const opponentWins=this._winningMoves(opponent,2);
+    if (opponentWins.length>=2) return -V3_MATE+ply;
+    if (this.state.emptyCount===0) return 0;
+    const key=this._key(color), entry=this.tt.get(key);
+    const ttMove=entry?entry.move:null;
+    if (entry && entry.depth>=depth && depth>0) {
+      this.ttHits++;
+      if (entry.flag===0) return entry.score;
+      if (entry.flag===1) alpha=Math.max(alpha,entry.score);
+      else beta=Math.min(beta,entry.score);
+      if (alpha>=beta) return entry.score;
+    }
+    let moves,nextDepth,nextQdepth;
+    if (opponentWins.length===1) {
+      moves=[opponentWins[0]]; nextDepth=Math.max(0,depth-1); nextQdepth=qdepth;
+    } else if (depth<=0) {
+      if (qdepth<=0) return this._evaluate(color);
+      const forcing=new Set(this._tacticalMap(color).keys());
+      if (!forcing.size) return this._evaluate(color);
+      moves=this._orderedMoves(color,depth,ply,true,ttMove).filter(m=>forcing.has(m)).slice(0,10);
+      if (!moves.length) return this._evaluate(color);
+      nextDepth=0; nextQdepth=qdepth-1;
+    } else {
+      moves=this._orderedMoves(color,depth,ply,false,ttMove);
+      nextDepth=depth-1; nextQdepth=qdepth;
+    }
+    if (!moves.length) return 0;
+    let best=-V3_INF,bestMove=moves[0];
+    for (let index=0;index<moves.length;index++) {
+      const move=moves[index]; this._checkTime();
+      const token=this.state.play(move,color); let score;
+      try {
+        if (token.won) score=V3_MATE-ply;
+        else if (index===0)
+          score=-this._pvs(nextDepth,-beta,-alpha,opponent,ply+1,nextQdepth);
+        else {
+          score=-this._pvs(nextDepth,-alpha-1,-alpha,opponent,ply+1,nextQdepth);
+          if (alpha<score && score<beta)
+            score=-this._pvs(nextDepth,-beta,-alpha,opponent,ply+1,nextQdepth);
+        }
+      } finally { this.state.undo(token); }
+      if (score>best) { best=score; bestMove=move; }
+      if (score>alpha) alpha=score;
+      if (alpha>=beta) { this._recordCutoff(color,move,depth,ply); break; }
+    }
+    if (depth>0) {
+      const flag=best<=alphaStart?2:(best>=beta?1:0);
+      this.tt.set(key,{depth,score:best,flag,move:bestMove});
+    }
+    return best;
+  }
+  _searchRoot(depth,moves) {
+    const key=this._key(this.color), entry=this.tt.get(key);
+    if (entry && moves.includes(entry.move))
+      moves=[entry.move,...moves.filter(move=>move!==entry.move)];
+    let alpha=-V3_INF,beta=V3_INF,best=-V3_INF,bestMove=moves[0];
+    for (let index=0;index<moves.length;index++) {
+      const move=moves[index]; this._checkTime();
+      const token=this.state.play(move,this.color); let score;
+      try {
+        if (token.won) score=V3_MATE;
+        else if (index===0) score=-this._pvs(depth-1,-beta,-alpha,this.opp,1);
+        else {
+          score=-this._pvs(depth-1,-alpha-1,-alpha,this.opp,1);
+          if (alpha<score && score<beta)
+            score=-this._pvs(depth-1,-beta,-alpha,this.opp,1);
+        }
+      } finally { this.state.undo(token); }
+      if (score>best) { best=score; bestMove=move; }
+      if (score>alpha) alpha=score;
+      if (score>=V3_MATE-2) break;
+    }
+    this.tt.set(key,{depth,score:best,flag:0,move:bestMove});
+    return [bestMove,best];
+  }
+  _principalVariation(limit=16) {
+    const result=[],tokens=[]; let color=this.color;
+    try {
+      for (let i=0;i<limit;i++) {
+        const entry=this.tt.get(this._key(color));
+        if (!entry||entry.move===null||this.state.board[entry.move]!==EMPTY) break;
+        result.push(this.state.xy(entry.move));
+        const token=this.state.play(entry.move,color); tokens.push(token);
+        if (token.won) break; color=JordanAI.other(color);
+      }
+    } finally { for (let i=tokens.length-1;i>=0;i--) this.state.undo(tokens[i]); }
+    return result;
+  }
+  chooseMove() {
+    const started=performance.now();
+    this.deadline=started+Math.max(10,this.timeBudget*1000); this._prepare();
+    const empties=[];
+    for (let move=0;move<this.state.count;move++) if (this.state.board[move]===EMPTY) empties.push(move);
+    if (!empties.length) return null;
+    const center=(this.state.n-1)/2;
+    empties.sort((a,b)=>{
+      const [ax,ay]=this.state.xy(a),[bx,by]=this.state.xy(b);
+      return (Math.abs(ax-center)+Math.abs(ay-center))-
+        (Math.abs(bx-center)+Math.abs(by-center))||a-b;
+    });
+    let completedMove=empties[0],completedScore=0,completedDepth=0;
+    try {
+      const mine=this._winningMoves(this.color,1);
+      if (mine.length) { completedMove=mine[0]; completedScore=V3_MATE; }
+      else {
+        const theirs=this._winningMoves(this.opp,3);
+        if (theirs.length===1) completedMove=theirs[0];
+        else if (theirs.length>=2) { completedMove=theirs[0]; completedScore=-V3_MATE; }
+        else {
+          const tactical=this._tacticalMap(this.color);
+          const forks=[...tactical.entries()].filter(item=>item[1].length>=2).map(item=>item[0]);
+          if (forks.length) { completedMove=forks[0]; completedScore=V3_MATE-2; }
+          else {
+            const moves=this._orderedMoves(this.color,1,0,false,null,true);
+            if (moves.length) {
+              completedMove=moves[0];
+              for (let depth=1;depth<=this.maxDepth;depth++) {
+                this._checkTime();
+                const [move,score]=this._searchRoot(depth,moves);
+                completedMove=move; completedScore=score; completedDepth=depth;
+                if (score>=V3_MATE-2) break;
+              }
+            }
+          }
+        }
+      }
+    } catch (error) { if (error!==AI_TIMEOUT_V3) throw error; }
+    const pv=this._principalVariation();
+    this.lastStats={completedDepth,nodes:this.nodes,ttHits:this.ttHits,
+      cutoffs:this.cutoffs,elapsed:(performance.now()-started)/1000,
+      score:completedScore,pv};
+    return this.state.xy(completedMove);
+  }
+}
+
 // ================= 界面 =================
 const canvas = document.getElementById("board");
 const ctx = canvas.getContext("2d");
@@ -885,7 +1348,7 @@ const aiBtn = document.getElementById("ai");
 const sideBtn = document.getElementById("side");
 function aiColor() { return humanColor === BLACK ? WHITE : BLACK; }
 function ensureAI() {
-  if (!ai || ai.game !== game) ai = new JordanAI(game, aiColor(), 2.0, 8);
+  if (!ai || ai.game !== game) ai = new JordanAI(game, aiColor(), 2.0, 12);
   return ai;
 }
 function updateSideBtn() {

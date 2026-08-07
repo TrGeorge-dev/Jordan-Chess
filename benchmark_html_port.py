@@ -8,7 +8,7 @@ import statistics
 import time
 from pathlib import Path
 
-from ai import JordanAI, ThreatJordanAI
+from ai import HybridJordanAI, ThreatJordanAI
 from benchmark_ai import generate_opening
 from engine import BLACK, WHITE, JordanChess
 
@@ -26,7 +26,7 @@ def play_one(size, opening, ported_color, budget, max_depth, seed):
 
     previous_color = WHITE if ported_color == BLACK else BLACK
     players = {
-        ported_color: ('ported', JordanAI(
+        ported_color: ('ported', HybridJordanAI(
             game, ported_color, time_budget=budget,
             max_depth=max_depth, seed=seed + 1000)),
         previous_color: ('previous', ThreatJordanAI(

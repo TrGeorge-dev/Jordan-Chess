@@ -26,34 +26,35 @@ function analyze(request) {
   const game = makeGame(request);
   const ai = new JordanAI(game, request.color,
     request.budget ?? 2.0, request.maxDepth ?? 8, request.seed ?? 1);
-  ai._deadline = performance.now() + 30000;
-  const mine = ai._t2AndForks(request.color);
+  ai.deadline = performance.now() + 30000;
+  ai._prepare();
+  const mine = ai._tacticalMap(request.color);
   const opp = request.color === 1 ? 2 : 1;
-  const theirs = ai._t2AndForks(opp);
+  const theirs = ai._tacticalMap(opp);
+  const mapping = map => [...map.entries()].map(([move,wins]) =>
+    [ai.state.xy(move), wins.map(point => ai.state.xy(point))]);
   return {
-    threats:ai._threats(request.color),
-    t2:mine[0],
-    forks:mine[1],
-    moves:ai._genMoves(request.color, 14),
+    threats:ai._winningMoves(request.color).map(move => ai.state.xy(move)),
+    tactical:mapping(mine),
+    opponentTactical:mapping(theirs),
+    moves:ai._orderedMoves(request.color, 1, 0, false, null, true)
+      .map(move => ai.state.xy(move)),
     evaluation:ai._evaluate(request.color),
-    rootCandidates:ai._rootCandidates(mine[0], mine[1],
-                                      theirs[0], theirs[1]),
+    features:(()=>{const f=ai._features(request.color); return [
+      f.forks,f.t2,f.mergePoints,f.frontierEdges,f.componentSquare,
+      f.largestComponent,f.openSquareOne,f.openSquareTwo,f.center];})(),
   };
 }
 
 function fixedDepth(request) {
   const game = makeGame(request);
   const ai = new JordanAI(game, request.color, 30, request.depth, request.seed ?? 1);
-  ai._deadline = performance.now() + 30000;
-  ai._tt = new Map(); ai._nodes = 0; ai._ttHits = 0;
-  const mine = ai._t2AndForks(request.color);
-  const opp = request.color === 1 ? 2 : 1;
-  const theirs = ai._t2AndForks(opp);
-  const candidates = ai._rootCandidates(mine[0], mine[1],
-                                        theirs[0], theirs[1]);
-  if (!candidates.length) return {move:ai._anyEmpty(), score:0};
-  const result = ai._searchRoot(request.depth, candidates);
-  return {move:result[0], score:result[1]};
+  ai.deadline = performance.now() + 30000;
+  ai._prepare();
+  const moves = ai._orderedMoves(request.color, 1, 0, false, null, true);
+  if (!moves.length) return {move:null, score:0};
+  const result = ai._searchRoot(request.depth, moves);
+  return {move:ai.state.xy(result[0]), score:result[1]};
 }
 
 function choose(request) {

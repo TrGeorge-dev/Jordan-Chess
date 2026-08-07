@@ -1001,7 +1001,7 @@ class ThreatJordanAI(LegacyJordanAI):
 # ============================================================================
 
 
-class JordanAI(LegacyJordanAI):
+class HybridJordanAI(LegacyJordanAI):
     """浏览器 AI 的 Python 同步版。
 
     保留 HTML 版在实战中更有效的轻量棋形评分和窄候选搜索，同时补齐：
@@ -1380,3 +1380,8 @@ class JordanAI(LegacyJordanAI):
             'score': completed_score,
         }
         return completed_move
+
+
+# V3 is the public default.  The previous HTML-synchronised implementation is
+# retained above as HybridJordanAI for controlled regression tournaments.
+from ai_v3 import JordanSearchAI as JordanAI

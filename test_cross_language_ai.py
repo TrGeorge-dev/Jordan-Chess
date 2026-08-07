@@ -4,12 +4,13 @@
 import json
 import os
 import random
+import shutil
 import subprocess
 import time
 import unittest
 from pathlib import Path
 
-from ai import JordanAI
+from ai_v3 import JordanSearchAI
 from engine import BLACK, WHITE, JordanChess
 
 
@@ -18,7 +19,11 @@ ROOT = Path(__file__).resolve().parent
 
 class HtmlBridge:
     def __init__(self):
-        node = os.environ.get('NODE_BINARY', 'node')
+        node = os.environ.get('NODE_BINARY') or shutil.which('node')
+        if node is None:
+            bundled = Path(
+                '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node')
+            node = str(bundled) if bundled.exists() else 'node'
         self.process = subprocess.Popen(
             [node, str(ROOT / 'html_ai_bridge.mjs')], cwd=ROOT,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -64,24 +69,41 @@ class CrossLanguageParityTests(unittest.TestCase):
         cls.bridge.close()
 
     def assert_analysis_equal(self, game, color):
-        py = JordanAI(game, color, time_budget=30, max_depth=8, seed=1)
-        py._deadline = time.perf_counter() + 30
-        t2, forks = py._t2_and_forks(color)
+        py = JordanSearchAI(game, color, time_budget=30,
+                            max_depth=12, seed=1)
+        py.deadline = time.perf_counter() + 30
+        py._prepare()
+        mine = py._tactical_map(color)
         opp = WHITE if color == BLACK else BLACK
-        t2o, forkso = py._t2_and_forks(opp)
+        theirs = py._tactical_map(opp)
         html = self.bridge.request(payload(game, color))
-        self.assertEqual([list(move) for move in py._threats(color)],
+        self.assertEqual([list(py.state.xy(move))
+                          for move in py._winning_moves(color)],
                          html['threats'])
-        self.assertEqual([list(move) for move in t2], html['t2'])
-        self.assertEqual([list(move) for move in forks], html['forks'])
-        self.assertEqual([list(move) for move in py._gen_moves(color, 14)],
+        expected_mine = [
+            [list(py.state.xy(move)),
+             [list(py.state.xy(point)) for point in wins]]
+            for move, wins in mine.items()
+        ]
+        expected_theirs = [
+            [list(py.state.xy(move)),
+             [list(py.state.xy(point)) for point in wins]]
+            for move, wins in theirs.items()
+        ]
+        self.assertEqual(expected_mine, html['tactical'])
+        self.assertEqual(expected_theirs, html['opponentTactical'])
+        expected_moves = [list(py.state.xy(move)) for move in
+                          py._ordered_moves(color, 1, 0, root=True)]
+        self.assertEqual(expected_moves,
                          html['moves'])
         self.assertEqual(py._evaluate(color), html['evaluation'])
-        expected_candidates = [
-            [list(move), score]
-            for move, score in py._root_candidates(t2, forks, t2o, forkso)
-        ]
-        self.assertEqual(expected_candidates, html['rootCandidates'])
+        features = py._features(color)
+        self.assertEqual([
+            features.forks, features.t2, features.merge_points,
+            features.frontier_edges, features.component_square,
+            features.largest_component, features.open_square_one,
+            features.open_square_two, features.center,
+        ], html['features'])
 
     def test_random_positions_match_all_intermediate_results(self):
         rng = random.Random(20260807)
@@ -110,23 +132,21 @@ class CrossLanguageParityTests(unittest.TestCase):
                 if game.place(*move)['winner'] is not None:
                     game.undo()
             color = game.turn
-            py = JordanAI(game, color, time_budget=30,
-                          max_depth=2, seed=1)
-            py._deadline = time.perf_counter() + 30
-            py._tt = {}; py._nodes = 0; py._tt_hits = 0
-            mine = py._t2_and_forks(color)
-            opp = WHITE if color == BLACK else BLACK
-            theirs = py._t2_and_forks(opp)
-            candidates = py._root_candidates(
-                mine[0], mine[1], theirs[0], theirs[1])
-            if candidates:
-                py_move, py_score = py._search_root(2, candidates)
+            py = JordanSearchAI(game, color, time_budget=30,
+                                max_depth=2, seed=1)
+            py.deadline = time.perf_counter() + 30
+            py._prepare()
+            moves = py._ordered_moves(color, 1, 0, root=True)
+            if moves:
+                py_move, py_score = py._search_root(2, moves)
             else:
-                py_move, py_score = py._any_empty(), 0
+                py_move, py_score = None, 0
             html = self.bridge.request(payload(
                 game, color, op='fixed_depth', depth=2))
             with self.subTest(sample=sample):
-                self.assertEqual(list(py_move), html['move'])
+                expected = (list(py.state.xy(py_move))
+                            if py_move is not None else None)
+                self.assertEqual(expected, html['move'])
                 self.assertEqual(py_score, html['score'])
 
     def test_reported_trap_and_multiple_fork_defense_match(self):
@@ -144,8 +164,8 @@ class CrossLanguageParityTests(unittest.TestCase):
 
         for game, color, expected in ((trap, WHITE, (5, 5)),
                                       (defense, WHITE, (1, 0))):
-            py = JordanAI(game, color, time_budget=2.0,
-                          max_depth=8, seed=1)
+            py = JordanSearchAI(game, color, time_budget=2.0,
+                                max_depth=12, seed=1)
             py_move = py.choose_move()
             html = self.bridge.request(payload(
                 game, color, op='choose', budget=2.0, maxDepth=8))

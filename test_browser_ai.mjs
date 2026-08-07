@@ -48,7 +48,10 @@ function sameMove(a, b) {
   for (const [x,y] of black) game.board[x][y] = BLACK;
   for (const [x,y] of white) game.board[x][y] = WHITE;
   const ai = new JordanAI(game, BLACK, 0.2, 6, 1);
-  const [t2] = ai._t2AndForks(BLACK);
+  ai.deadline = performance.now() + 1000;
+  ai._prepare();
+  const t2 = [...ai._tacticalMap(BLACK).entries()]
+    .filter(item => item[1].length === 1).map(item => ai.state.xy(item[0]));
   assert.ok(t2.some(move => sameMove(move, [2,2])));
   const old = new LegacyJordanAI(game, BLACK, 0.2, 3, 1);
   const [oldT2, oldForks] = old._t2AndForks(BLACK);

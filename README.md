@@ -27,16 +27,19 @@
 ```
 jordan-chess/
 ├── engine.py        核心引擎（纯 Python，无依赖）—— 棋盘/连通性/环路检测/胜负结算/悔棋
-├── ai.py            默认混合 AI（与 HTML 同步）+ 迁移前完整威胁 AI
+├── ai.py            默认导出 V3 AI，并保留旧版 AI 供回归对战
+├── ai_v3.py         增量连通状态 + PVS 搜索核心（Python）
 ├── cli.py           命令行版（python3 cli.py [大小] [--ai]）
 ├── gui.py           pygame 图形界面版（pip install pygame，python3 gui.py [大小]）
 ├── index.html       浏览器版（单文件，自适应移动端，含 AI）
 ├── test_engine.py   引擎自测（python3 test_engine.py [-v]）
 ├── test_ai.py       AI 自测（python3 test_ai.py [-v]）
+├── test_ai_v3.py    V3 数学状态、撤销、威胁与搜索专项测试
 ├── test_browser_ai.mjs  浏览器 AI 无头自测（Node.js，可选）
 ├── test_cross_language_ai.py  Python/HTML 逐项同步测试
 ├── benchmark_ai.py  新旧 AI 成对换色对战，输出 CSV/JSON
 ├── benchmark_html_port.py  HTML 迁移版与旧 Python AI 成对换色对战
+├── benchmark_v3.py  V3 与修改前默认 AI 的多棋盘换色对战
 ├── plot_benchmark.py 对战数据生成 SVG 图（无第三方依赖）
 ├── plot_html_port_results.py  多棋盘对战汇总并生成 PNG/SVG
 ├── html_ai_bridge.mjs  测试时调用 index.html 真实 AI
@@ -44,6 +47,19 @@ jordan-chess/
 ```
 
 浏览器版：双击 index.html 即可(无需安装, 推荐分享方式)
+
+## Python 开发环境
+
+项目使用本地 `.venv` 隔离测试与绘图依赖；虚拟环境本身不会提交到 Git，
+可通过依赖清单在任意电脑重建：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+```
+
+退出虚拟环境时运行 `deactivate`。
 
 ## AI 对手（人机对战）
 
@@ -60,18 +76,20 @@ python3 gui.py --ai          # 或运行时点按钮
 # 浏览器版: 点「人机」+「执黑/执白」选边
 ```
 
-**AI 算法**（`JordanAI` 在 Python/HTML 中保持同步）
+**AI 算法**（V3 `JordanAI` 在 Python/HTML 中保持同步）
 
 威胁体系（成环 = 落子即构成约当曲线立即获胜）：
 - **T1 一步威胁**：某空点落子即成环。AI 必走/必堵（永不错过直接胜负）。
 - **T2 两步威胁**：落子后产生 1 个 T1，迫使对手应对（争夺先手）。
 - **fork 双威胁**：落子后产生 ≥2 个 T1。对手只能堵一个 → **两步内必胜**；AI 会主动制造 fork 并抢占对手的 fork 点。
 
-决策流程：己方 T1 → 堵对方唯一 T1 → 比较 fork/T2 进攻、防守和反击 → 从约 14 个重点候选位置逐层加深搜索。叶面评分综合连接潜力、活动空间和棋形结构；时间到时丢弃未完成层，只使用最后一层完整结果。相同局面通过置换表复用，深度边界仍有强制威胁时会继续有限延伸。
+V3 不再每次模拟都重新扫描连通图。它使用可撤销并查集增量维护双方连通分量，落子和撤销只更新受影响的结构；立即胜点和后续威胁均由同一个连通性条件推导。
 
-威胁判定核心：空点 v 的两个同色邻居在同一连通分量（并查集 O(1)）⟺ 落 v 即成环——与引擎的环路检测（逐对 BFS）完全等价。AI 也会检查只连接 1 枚己子的延伸走法，因为它仍可能在新棋旁边制造 T1。Python 与浏览器版均按时间预算逐层加深，默认最多搜索 8 层。迁移前的完整威胁版保留为 `ThreatJordanAI`，用于回归和强度对比。
+决策使用迭代加深 PVS（主变搜索）：第一条主变化使用完整窗口，其余走法先用窄窗口验证，必要时再重新搜索。置换表复用重复局面，历史启发和杀手走法改善剪枝顺序，深度边界仍有强制威胁时进行有限战术延伸。所有战术点都会进入候选集合，普通走法才受宽度限制；超时只丢弃未完成层。
 
-**自测**：`python3 test_ai.py` 11 项；浏览器 AI 可用 `node test_browser_ai.mjs` 运行 5 项无头测试。`python3 test_cross_language_ai.py` 会核对两端的 T1、T2、fork、评分、候选顺序和固定深度搜索结果，防止再次出现只同步部分逻辑的问题。
+威胁判定核心：空点 v 的两个同色邻居在同一连通分量 ⟺ 落 v 即成环——与引擎的逐对 BFS 完全等价。Python 与浏览器版默认最多搜索 12 层。修改前的浏览器同步版保留为 `HybridJordanAI`，完整威胁版保留为 `ThreatJordanAI`，仅用于回归对战。
+
+**自测**：`python3 test_ai.py` 11 项，`python3 -m unittest test_ai_v3.py -v` 8 项；浏览器 AI 可用 `node test_browser_ai.mjs` 运行 5 项无头测试。`python3 test_cross_language_ai.py` 会核对两端的立即胜点、后续威胁映射、评价特征、候选顺序和固定深度搜索结果，防止再次出现只同步部分逻辑的问题。
 
 **新旧 AI 对战与可视化**：每个开局走两盘并交换黑白，双方使用相同单步时间上限，避免先手优势误导结果。
 
@@ -89,6 +107,17 @@ HTML 迁移版 Python AI 与迁移前 Python AI 的换色对战：
 python3 benchmark_html_port.py --pairs 12 --size 10 --budget 0.12 \
   --output-dir benchmark-output
 ```
+
+V3 与修改前默认 AI 的多棋盘换色对战：
+
+```bash
+python3 benchmark_v3.py --pairs 12 --sizes 8,10 --budget 0.12 \
+  --output-dir benchmark-v3
+python3 plot_v3_results.py benchmark-v3/v3_games.csv \
+  benchmark-v3/v3_summary.json benchmark-v3/v3_results.png
+```
+
+算法选择、失败方案和消融实验记录见 `AI_RESEARCH.md`。
 
 ## 启动方式
 
