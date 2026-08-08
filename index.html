@@ -22,9 +22,12 @@
   #status.info { color: #a06010; }
   #board { background: #fbfaf6; border: 1px solid #ccc; border-radius: 8px;
            touch-action: manipulation; max-width: 100%; }
-  .buttons { display: flex; gap: 12px; margin: 12px 0; align-items: center; }
+  .buttons {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
+    width: min(660px, 96vw); margin: 12px 0; align-items: center;
+  }
   .buttons button {
-    font-size: 16px; padding: 8px 26px; border-radius: 8px; border: 1px solid #bbb;
+    font-size: 16px; padding: 8px 18px; border-radius: 8px; border: 1px solid #bbb;
     background: #e8e8e2; cursor: pointer;
   }
   .buttons button:active { background: #cfd6e6; }
@@ -33,7 +36,7 @@
     width: 64px; font-size: 16px; padding: 6px 8px; border-radius: 8px;
     border: 1px solid #bbb; text-align: center;
   }
-  #ai.on { background: #cfd6e6; border-color: #7a93c4; }
+  #ai.on, #aivai.on { background: #cfd6e6; border-color: #7a93c4; }
   details {
     width: min(660px, 94vw); margin-top: 10px; font-size: 13px; line-height: 1.7;
     background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 8px 14px;
@@ -61,11 +64,12 @@
   <button id="new">新局</button>
   <button id="undo">悔棋</button>
   <button id="ai" class="aibtn">人机</button>
+  <button id="aivai" class="aibtn">AI-AI</button>
   <button id="side" class="aibtn" style="display:none">执黑</button>
 </div>
 <details>
   <summary>规则（约当曲线定理）</summary>
-  <p>N×N 方格 → (N+1)×(N+1) 格点（默认 10×10，可在上方自定义 2~30）。黑先白后，轮流在空白格点放一枚己方棋子。同色棋子上下左右相邻视为连通（斜向不连通）。落子使己方棋子形成任意<strong>不自交闭合路径</strong>（约当曲线）即立即获胜——无论环内有无对方棋子。若棋盘下满且从未成环则为平局；棋子不可移动。点「人机」可与 AI 对战（你执黑先手）。</p>
+  <p>N×N 方格 → (N+1)×(N+1) 格点（默认 10×10，可在上方自定义 2~30）。黑先白后，轮流在空白格点放一枚己方棋子。同色棋子上下左右相邻视为连通（斜向不连通）。落子使己方棋子形成任意<strong>不自交闭合路径</strong>（约当曲线）即立即获胜——无论环内有无对方棋子。若棋盘下满且从未成环则为平局；棋子不可移动。点「人机」可与 AI 对战；点「AI-AI」可观看两个 V3 AI 自动对弈，再点一次即可暂停。</p>
 </details>
 
 <script>
@@ -1205,6 +1209,34 @@ class JordanAI {
 }
 
 // ================= 界面 =================
+// AI 搜索放入 Web Worker，避免两秒搜索阻塞按钮、绘图和模式切换。
+const AI_WORKER_CORE = document.currentScript.textContent
+  .split("// ================= 界面 =================")[0];
+const AI_WORKER_SOURCE = AI_WORKER_CORE + `
+self.onmessage = event => {
+  const request = event.data;
+  try {
+    const game = new JordanChess(request.size);
+    game.board = request.board.map(row => row.slice());
+    game.turn = request.turn;
+    game.history = request.history.map(move => move.slice());
+    game.winner = null;
+    const ai = new JordanAI(game, request.color, request.timeBudget,
+      request.maxDepth, request.seed);
+    if (request.historyScores)
+      ai.historyScores = request.historyScores.map(row => row.slice());
+    const move = ai.chooseMove();
+    self.postMessage({id:request.id, ok:true, move,
+      stats:ai.lastStats, historyScores:ai.historyScores});
+  } catch (error) {
+    self.postMessage({id:request.id, ok:false,
+      error:String(error && (error.stack || error.message) || error)});
+  }
+};`;
+const AI_WORKER_URL = URL.createObjectURL(
+  new Blob([AI_WORKER_SOURCE], {type:"text/javascript"}));
+window.addEventListener("beforeunload", () => URL.revokeObjectURL(AI_WORKER_URL));
+
 const canvas = document.getElementById("board");
 const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
@@ -1226,12 +1258,18 @@ function resizeCanvas() {
 
 let boardSize = 10;
 function startNewGame() {
+  cancelPendingAI();
   game = new JordanChess(boardSize);
+  resetAIMemory();
   resizeCanvas();
-  statusEl.textContent = `新局开始：黑方先手（${boardSize}×${boardSize} 方格）`;
-  statusEl.classList.add("info");
   draw();
-  if (aiMode && game.winner === null && game.turn === aiColor()) aiMove();
+  statusEl.textContent = gameMode === MODE_AI_AI
+    ? `AI-AI 对战开始：黑方 AI 先手（${boardSize}×${boardSize} 方格）`
+    : gameMode === MODE_HUMAN_AI
+      ? (humanColor === BLACK ? "你执黑（先手），AI 执白。" : "你执白（后手），AI 执黑先走。")
+      : `新局开始：黑方先手（${boardSize}×${boardSize} 方格）`;
+  statusEl.classList.add("info");
+  scheduleAIMoveIfNeeded();
 }
 function applySizeFromInput() {
   const v = parseInt(sizeInput.value, 10);
@@ -1304,7 +1342,8 @@ function draw() {
 
 canvas.addEventListener("click", (ev) => {
   if (game.winner !== null) return;
-  if (aiMode && game.turn !== humanColor) return;   // AI 轮次, 忽略人手
+  if (gameMode === MODE_AI_AI) return;
+  if (gameMode === MODE_HUMAN_AI && game.turn !== humanColor) return;
   const rect = canvas.getBoundingClientRect();
   const sx = (ev.clientX - rect.left) * (SIZE / rect.width);
   const sy = (ev.clientY - rect.top) * (SIZE / rect.height);
@@ -1327,75 +1366,170 @@ canvas.addEventListener("click", (ev) => {
     setTimeout(draw, 400);   // 稍后展示胜利横幅
   }
   draw();
-  if (aiMode && game.winner === null && game.turn === aiColor()) aiMove();
+  scheduleAIMoveIfNeeded();
 });
 
 document.getElementById("undo").addEventListener("click", () => {
-  if (game.undo()) statusEl.textContent = "已悔棋。";
-  else statusEl.textContent = "没有可撤销的步骤。";
-  statusEl.classList.add("info");
+  const pausedAIvsAI = gameMode === MODE_AI_AI;
+  cancelPendingAI();
+  if (pausedAIvsAI) {
+    gameMode = MODE_LOCAL;
+    updateModeButtons();
+  }
+  const undone = game.undo();
+  resetAIMemory();
   draw();
-  if (aiMode && game.winner === null && game.turn === aiColor()) aiMove();
+  statusEl.textContent = undone
+    ? (pausedAIvsAI ? "AI-AI 对战已暂停，并撤销了一步。" : "已悔棋。")
+    : "没有可撤销的步骤。";
+  statusEl.classList.add("info");
+  scheduleAIMoveIfNeeded();
 });
 document.getElementById("new").addEventListener("click", applySizeFromInput);
 sizeInput.addEventListener("change", applySizeFromInput);
 
-// ---- 人机模式: 人类可选执黑(先手)或执白(后手) ----
-let aiMode = false;
+// ---- 对局模式: 双人 / 人机 / AI-AI ----
+const MODE_LOCAL = "local", MODE_HUMAN_AI = "human-ai", MODE_AI_AI = "ai-ai";
+let gameMode = MODE_LOCAL;
 let humanColor = BLACK;
-let ai = null;
+let aiMemory = {[BLACK]: null, [WHITE]: null};
+let aiGeneration = 0;
+let aiThinking = false;
+let activeAIWorker = null;
+let activeAITimer = null;
 const aiBtn = document.getElementById("ai");
+const aiVsAiBtn = document.getElementById("aivai");
 const sideBtn = document.getElementById("side");
 function aiColor() { return humanColor === BLACK ? WHITE : BLACK; }
-function ensureAI() {
-  if (!ai || ai.game !== game) ai = new JordanAI(game, aiColor(), 2.0, 12);
-  return ai;
+function resetAIMemory() {
+  aiMemory = {[BLACK]: null, [WHITE]: null};
 }
-function updateSideBtn() {
+function cancelPendingAI() {
+  aiGeneration++;
+  aiThinking = false;
+  if (activeAITimer !== null) {
+    clearTimeout(activeAITimer);
+    activeAITimer = null;
+  }
+  if (activeAIWorker !== null) {
+    activeAIWorker.terminate();
+    activeAIWorker = null;
+  }
+}
+function isAITurn() {
+  if (!game || game.winner !== null) return false;
+  if (gameMode === MODE_AI_AI) return true;
+  return gameMode === MODE_HUMAN_AI && game.turn === aiColor();
+}
+function updateModeButtons() {
+  aiBtn.classList.toggle("on", gameMode === MODE_HUMAN_AI);
+  aiVsAiBtn.classList.toggle("on", gameMode === MODE_AI_AI);
+  aiVsAiBtn.textContent = gameMode === MODE_AI_AI ? "暂停AI对战" : "AI-AI";
   sideBtn.textContent = humanColor === BLACK ? "执黑" : "执白";
-  sideBtn.style.display = aiMode ? "" : "none";
+  sideBtn.style.display = gameMode === MODE_HUMAN_AI ? "" : "none";
 }
-function aiMove() {
-  if (!aiMode || game.winner !== null || game.turn !== aiColor()) return;
-  statusEl.textContent = "AI 思考中…";
-  statusEl.classList.add("info");
+function scheduleAIMoveIfNeeded(delay = 30) {
+  if (!isAITurn() || aiThinking) return;
+  const token = ++aiGeneration;
+  const activeGame = game;
+  const color = game.turn;
+  aiThinking = true;
   draw();
-  setTimeout(() => {
-    const mv = ensureAI().chooseMove();
-    const r = game.place(mv[0], mv[1]);
-    if (r.ok && r.loops.length > 0) {
-      statusEl.textContent = `★ AI 形成闭环 ${r.loops.length} 个 —— AI 获胜！`;
-      statusEl.classList.add("info");
-    } else if (r.ok) {
-      statusEl.textContent = `AI 落子：(${mv[0]}, ${mv[1]})`;
-      statusEl.classList.add("info");
+  statusEl.textContent = `${CNAME[color]} AI 思考中…`;
+  statusEl.classList.add("info");
+  activeAITimer = setTimeout(() => {
+    activeAITimer = null;
+    if (token !== aiGeneration || game !== activeGame || game.turn !== color || !isAITurn()) {
+      if (token === aiGeneration) aiThinking = false;
+      return;
     }
-    draw();
-  }, 30);
+    const worker = new Worker(AI_WORKER_URL);
+    activeAIWorker = worker;
+    const fail = message => {
+      if (activeAIWorker === worker) activeAIWorker = null;
+      worker.terminate();
+      if (token !== aiGeneration) return;
+      aiThinking = false;
+      draw();
+      statusEl.textContent = message;
+      statusEl.classList.add("info");
+    };
+    worker.onerror = event => {
+      event.preventDefault();
+      console.error(event.message || event);
+      fail(`${CNAME[color]} AI 后台计算失败，请重新开始对局。`);
+    };
+    worker.onmessage = event => {
+      if (activeAIWorker === worker) activeAIWorker = null;
+      worker.terminate();
+      const data = event.data;
+      if (token !== aiGeneration || game !== activeGame || game.turn !== color || !isAITurn())
+        return;
+      if (!data.ok) {
+        console.error(data.error);
+        fail(`${CNAME[color]} AI 计算失败，请重新开始对局。`);
+        return;
+      }
+      aiMemory[color] = data.historyScores;
+      const mv = data.move;
+      if (!mv) {
+        aiThinking = false;
+        draw();
+        return;
+      }
+      const r = game.place(mv[0], mv[1]);
+      aiThinking = false;
+      draw();
+      if (r.ok && r.loops.length > 0) {
+        statusEl.textContent = `★ ${CNAME[color]} AI 形成闭环 ${r.loops.length} 个 —— 获胜！`;
+        statusEl.classList.add("info");
+      } else if (r.ok) {
+        statusEl.textContent = `${CNAME[color]} AI 落子：(${mv[0]}, ${mv[1]})`;
+        statusEl.classList.add("info");
+      }
+      if (gameMode === MODE_AI_AI && game.winner === null)
+        scheduleAIMoveIfNeeded(180);
+    };
+    worker.postMessage({
+      id:token, size:activeGame.size,
+      board:activeGame.board.map(row => row.slice()),
+      turn:activeGame.turn,
+      history:activeGame.history.map(move => move.slice()),
+      color, timeBudget:2.0, maxDepth:12, seed:1,
+      historyScores:aiMemory[color],
+    });
+  }, delay);
 }
 aiBtn.addEventListener("click", () => {
-  aiMode = !aiMode;
-  aiBtn.classList.toggle("on", aiMode);
-  updateSideBtn();
-  if (aiMode) {
-    statusEl.textContent = "人机模式：点「执黑/执白」选边。";
-  } else {
-    statusEl.textContent = "双人模式。";
-  }
-  statusEl.classList.add("info");
+  cancelPendingAI();
+  gameMode = gameMode === MODE_HUMAN_AI ? MODE_LOCAL : MODE_HUMAN_AI;
+  updateModeButtons();
   draw();
-  if (aiMode && game.winner === null && game.turn === aiColor()) aiMove();
+  statusEl.textContent = gameMode === MODE_HUMAN_AI
+    ? "人机模式：点「执黑/执白」选边。"
+    : "双人模式。";
+  statusEl.classList.add("info");
+  scheduleAIMoveIfNeeded();
+});
+aiVsAiBtn.addEventListener("click", () => {
+  const pausing = gameMode === MODE_AI_AI;
+  cancelPendingAI();
+  gameMode = pausing ? MODE_LOCAL : MODE_AI_AI;
+  updateModeButtons();
+  draw();
+  statusEl.textContent = pausing
+    ? "AI-AI 对战已暂停；再次点击可继续。"
+    : "AI-AI 对战：两个 V3 AI 将自动轮流落子。";
+  statusEl.classList.add("info");
+  scheduleAIMoveIfNeeded();
 });
 sideBtn.addEventListener("click", () => {
   humanColor = (humanColor === BLACK) ? WHITE : BLACK;
-  updateSideBtn();
-  startNewGame();   // 换边需重开
-  statusEl.textContent = humanColor === BLACK
-    ? "你执黑（先手），AI 执白。"
-    : "你执白（后手），AI 执黑先走。";
-  statusEl.classList.add("info");
+  updateModeButtons();
+  startNewGame();
 });
 
+updateModeButtons();
 startNewGame();   // 首次开局(默认 10×10)
 </script>
 </body>

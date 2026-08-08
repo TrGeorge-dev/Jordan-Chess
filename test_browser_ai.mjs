@@ -86,4 +86,112 @@ function sameMove(a, b) {
   assert.equal(game.board[move[0]][move[1]], EMPTY);
 }
 
-console.log('浏览器 AI: 5 项测试全部通过');
+// AI-AI 界面模式：两个颜色必须自动轮流落子，暂停后旧计时器不得继续走。
+{
+  class FakeElement {
+    constructor() {
+      this.listeners = new Map(); this.style = {}; this.textContent = '';
+      this.value = '10'; this.width = 0; this.height = 0;
+      const classes = new Set();
+      this.classList = {
+        add: name => classes.add(name),
+        remove: name => classes.delete(name),
+        toggle: (name, force) => force === undefined
+          ? (classes.has(name) ? (classes.delete(name), false) : (classes.add(name), true))
+          : (force ? classes.add(name) : classes.delete(name), force),
+        contains: name => classes.has(name),
+      };
+    }
+    addEventListener(type, listener) { this.listeners.set(type, listener); }
+    click() { this.listeners.get('click')?.({}); }
+    getBoundingClientRect() { return {left:0, top:0, width:660, height:660}; }
+  }
+  const elements = Object.fromEntries(
+    ['board','status','size','new','undo','ai','aivai','side']
+      .map(id => [id, new FakeElement()]));
+  const drawing = new Proxy({}, {get: () => () => {}});
+  drawing.setTransform = drawing.clearRect = drawing.beginPath = drawing.moveTo =
+    drawing.lineTo = drawing.stroke = drawing.fillText = drawing.closePath =
+    drawing.fill = drawing.arc = () => {};
+  elements.board.getContext = () => drawing;
+  const timers = [];
+  const schedule = callback => {
+    const task = {callback, cancelled:false};
+    timers.push(task); return task;
+  };
+  const runNextTimer = () => {
+    const task = timers.shift();
+    if (task && !task.cancelled) task.callback();
+  };
+  const workers = [];
+  class FakeWorker {
+    constructor() { this.terminated = false; workers.push(this); }
+    postMessage(request) {
+      schedule(() => {
+        if (this.terminated) return;
+        let move = null;
+        outer: for (let x=0;x<request.board.length;x++)
+          for (let y=0;y<request.board.length;y++)
+            if (request.board[x][y] === EMPTY) { move=[x,y]; break outer; }
+        this.onmessage?.({data:{id:request.id, ok:true, move,
+          historyScores:request.historyScores}});
+      });
+    }
+    terminate() { this.terminated = true; }
+  }
+  const uiContext = vm.createContext({
+    console, performance,
+    window:{devicePixelRatio:1, innerWidth:800, addEventListener:()=>{}},
+    document:{currentScript:{textContent:script}, getElementById:id => elements[id]},
+    Blob:class {},
+    URL:{createObjectURL:()=>"blob:test-ai-worker", revokeObjectURL:()=>{}},
+    Worker:FakeWorker,
+    setTimeout:schedule,
+    clearTimeout:task => { if (task) task.cancelled = true; },
+  });
+  vm.runInContext(script + `\n;globalThis.__ui = {
+    JordanAI, BLACK, WHITE,
+    getGame: () => game, getMode: () => gameMode,
+    MODE_AI_AI, workerSource:AI_WORKER_SOURCE
+  };`, uiContext, {filename:'index.html'});
+  const workerMessages = [];
+  const workerSelf = {postMessage:message => workerMessages.push(message)};
+  const workerContext = vm.createContext({console, performance, self:workerSelf});
+  vm.runInContext(uiContext.__ui.workerSource, workerContext,
+    {filename:'jordan-ai-worker.js'});
+  workerSelf.onmessage({data:{
+    id:99, size:4,
+    board:Array.from({length:5},()=>Array(5).fill(EMPTY)),
+    turn:BLACK, history:[], color:BLACK,
+    timeBudget:0.02, maxDepth:4, seed:1, historyScores:null,
+  }});
+  assert.equal(workerMessages[0].ok, true);
+  assert.equal(workerMessages[0].id, 99);
+  assert.equal(workerMessages[0].move.length, 2);
+
+  // 在 Worker 已开始思考、尚未返回结果时点击暂停，必须立即终止且不落子。
+  elements.aivai.click();
+  assert.equal(uiContext.__ui.getMode(), uiContext.__ui.MODE_AI_AI);
+  assert.ok(elements.aivai.classList.contains('on'));
+  runNextTimer();
+  assert.equal(workers.length, 1);
+  elements.aivai.click();
+  while (timers.length) runNextTimer();
+  assert.equal(workers[0].terminated, true);
+  assert.equal(uiContext.__ui.getGame().history.length, 0);
+  assert.equal(elements.aivai.textContent, 'AI-AI');
+
+  // 恢复后仍能由黑、白两个 AI 连续各下一步。
+  elements.aivai.click();
+  for (let i=0;i<4;i++) runNextTimer();
+  assert.deepEqual(
+    Array.from(uiContext.__ui.getGame().history, move => move[2]),
+    [uiContext.__ui.BLACK, uiContext.__ui.WHITE]);
+  elements.aivai.click();
+  const moveCount = uiContext.__ui.getGame().history.length;
+  while (timers.length) runNextTimer();
+  assert.equal(uiContext.__ui.getGame().history.length, moveCount);
+  assert.equal(elements.aivai.textContent, 'AI-AI');
+}
+
+console.log('浏览器 AI: 6 项测试全部通过');
