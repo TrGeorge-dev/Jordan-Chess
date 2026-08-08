@@ -8,7 +8,7 @@ import time
 import traceback
 
 from engine import JordanChess, BLACK, WHITE, EMPTY
-from ai import JordanAI
+from ai import JordanAI, LegacyJordanAI
 
 
 def setup(game, pieces, turn=BLACK):
@@ -69,6 +69,59 @@ def test_ai_blocks_single_threat():
     assert threats_white, '构造的局面对手应存在威胁点'
     mv = ai.choose_move()
     assert mv in threats_white, f'应堵白方威胁点 {threats_white}, 实际走 {mv}'
+
+
+def test_ai_detects_single_neighbor_t2():
+    """单邻居延伸也可能在相邻空点制造 T1，不能被 T2 预筛选漏掉。"""
+    g = JordanChess(size=5)
+    setup(g, {
+        (2, 1): BLACK, (1, 1): BLACK, (0, 1): BLACK, (0, 2): BLACK,
+        (0, 3): BLACK, (0, 4): BLACK, (1, 4): BLACK, (2, 4): BLACK,
+        (1, 2): WHITE, (1, 3): WHITE,
+    }, turn=BLACK)
+    ai = JordanAI(g, BLACK, time_budget=0.1, seed=1)
+    assert ai._threats(BLACK) == []
+    t2, _ = ai._t2_and_forks(BLACK)
+    assert (2, 2) in t2, f'单邻居延伸点 (2,2) 应是 T2，实际 {t2}'
+
+    # 旧版正是因为要求至少两个同色邻居而漏掉这个位置。
+    legacy = LegacyJordanAI(g, BLACK, time_budget=0.1, seed=1)
+    old_t2, old_forks = legacy._t2_and_forks(BLACK)
+    assert (2, 2) not in old_t2 and (2, 2) not in old_forks
+
+
+def test_ai_compares_multiple_fork_defenses():
+    """多个对手 fork 并存时，应选择能同时化解它们的位置。"""
+    g = JordanChess(size=4)
+    for move in ((0, 0), (2, 2), (3, 1), (2, 3), (2, 0), (0, 3),
+                 (3, 3), (4, 2), (1, 1), (4, 3), (4, 4), (4, 0),
+                 (1, 2)):
+        r = g.place(*move)
+        assert r['ok'] and r['winner'] is None
+    assert g.turn == WHITE
+
+    ai = JordanAI(g, WHITE, time_budget=0.2, max_depth=8, seed=1)
+    _, opponent_forks = ai._t2_and_forks(BLACK)
+    assert set(opponent_forks) == {(0, 1), (1, 0), (2, 1)}
+    assert ai.choose_move() == (1, 0)
+
+    # 旧版任取第一个 (0,1)，黑方随后走 (2,1) 即产生双 T1。
+    legacy = LegacyJordanAI(g, WHITE, time_budget=0.2,
+                            max_depth=3, seed=1)
+    assert legacy.choose_move() == (0, 1)
+
+
+def test_ai_timeout_keeps_board_unchanged():
+    """无论在哪一层超时，所有模拟棋子都必须被恢复。"""
+    g = JordanChess(size=10)
+    for move in ((5, 5), (4, 5), (5, 6), (4, 6)):
+        assert g.place(*move)['ok']
+    before = [row[:] for row in g.board]
+    ai = JordanAI(g, g.turn, time_budget=0.01, max_depth=20, seed=1)
+    mv = ai.choose_move()
+    assert g.board == before
+    assert g.get(*mv) == EMPTY
+    assert ai.last_stats['elapsed'] < 0.2
 
 
 def test_ai_threat_detection_agrees_with_engine():
