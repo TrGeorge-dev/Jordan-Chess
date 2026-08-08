@@ -73,7 +73,7 @@ python3 cli.py 13 --ai       # 13×13; 局内按 a 可切换 人机/双人
 # pygame 版: 底部 [AI:OFF] 按钮切换人机模式
 python3 gui.py --ai          # 或运行时点按钮
 
-# 浏览器版: 点「人机」+「执黑/执白」选边
+# 浏览器版: 点「人机」+「执黑/执白」选边；点「AI-AI」观看自动对弈
 ```
 
 **AI 算法**（V3 `JordanAI` 在 Python/HTML 中保持同步）
@@ -89,7 +89,7 @@ V3 不再每次模拟都重新扫描连通图。它使用可撤销并查集增�
 
 威胁判定核心：空点 v 的两个同色邻居在同一连通分量 ⟺ 落 v 即成环——与引擎的逐对 BFS 完全等价。Python 与浏览器版默认最多搜索 12 层。修改前的浏览器同步版保留为 `HybridJordanAI`，完整威胁版保留为 `ThreatJordanAI`，仅用于回归对战。
 
-**自测**：`python3 test_ai.py` 11 项，`python3 -m unittest test_ai_v3.py -v` 8 项；浏览器 AI 可用 `node test_browser_ai.mjs` 运行 5 项无头测试。`python3 test_cross_language_ai.py` 会核对两端的立即胜点、后续威胁映射、评价特征、候选顺序和固定深度搜索结果，防止再次出现只同步部分逻辑的问题。
+**自测**：`python3 test_ai.py` 11 项，`python3 -m unittest test_ai_v3.py -v` 8 项；浏览器 AI 可用 `node test_browser_ai.mjs` 运行 6 项无头测试（包含 AI-AI 自动轮流落子及暂停检查）。`python3 test_cross_language_ai.py` 会核对两端的立即胜点、后续威胁映射、评价特征、候选顺序和固定深度搜索结果，防止再次出现只同步部分逻辑的问题。
 
 **新旧 AI 对战与可视化**：每个开局走两盘并交换黑白，双方使用相同单步时间上限，避免先手优势误导结果。
 
@@ -135,7 +135,7 @@ python3 gui.py [棋盘大小]
 
 # 浏览器版
 # 直接用浏览器打开 index.html；顶部"棋盘"输入框可改大小(2~30)，点"新局"生效；
-# 点「人机」与 AI 对战（你执黑先手）
+# 点「人机」与 AI 对战；点「AI-AI」让两个 V3 AI 自动对弈，再点一次暂停
 ```
 
 ## 引擎 API
