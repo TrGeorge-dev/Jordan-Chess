@@ -151,59 +151,23 @@ class JordanChess {
     }
     return seen;
   }
-  _findNewCycles(x, y, color, maxCycles=5) {
+  _findNewCycles(x, y, color, maxCycles) {
     const nbrs = this._sameColorNeighbors(x, y, color);
     const cycles = [];
     const seenKeys = new Set();
-    const budget = {steps: 20000};
     for (let i = 0; i < nbrs.length; i++)
       for (let j = i+1; j < nbrs.length; j++) {
-        if (cycles.length >= maxCycles || budget.steps <= 0) return cycles;
         // minEdges=2: 环至少 4 顶点(排除 3 顶点三角形, ADR-0001)
         const path = this._shortestPath(nbrs[i], nbrs[j], [x,y], color, 2);
         if (path === null) continue;
         const cycle = [[x,y]].concat(path);
         // ADR-0002: 环内必须 ≥1 格点(排除单位方格/X形)
-        if (this._cycleContainsLatticePoint(cycle)) {
-          const key = cycle.map(p=>p[0]+","+p[1]).sort().join("|");
-          if (!seenKeys.has(key)) { seenKeys.add(key); cycles.push(cycle); }
-          continue;
-        }
-        // 最短路径可能只组成无格点小环；继续找能围住格点的绕行路径。
-        const detours = this._simplePathsEnclosing(
-          nbrs[i], nbrs[j], [x,y], color, [x,y], budget);
-        for (const detour of detours) {
-          const larger = [[x,y]].concat(detour);
-          const key = larger.map(p=>p[0]+","+p[1]).sort().join("|");
-          if (!seenKeys.has(key)) { seenKeys.add(key); cycles.push(larger); }
-          if (cycles.length >= maxCycles) return cycles;
-        }
+        if (!this._cycleContainsLatticePoint(cycle)) continue;
+        const key = cycle.map(p=>p[0]+","+p[1]).sort().join("|");
+        if (!seenKeys.has(key)) { seenKeys.add(key); cycles.push(cycle); }
+        if (maxCycles !== undefined && cycles.length >= maxCycles) return cycles;
       }
     return cycles;
-  }
-  _simplePathsEnclosing(start, target, avoid, color, closingVertex, budget) {
-    const results = [], visited = new Set([start[0]+","+start[1]]);
-    const maxLength = 14, maxPaths = 30;
-    const dfs = (cur, path) => {
-      budget.steps--;
-      if (budget.steps <= 0 || results.length >= maxPaths ||
-          path.length > maxLength) return;
-      if (cur[0]===target[0] && cur[1]===target[1]) {
-        const cycle = [closingVertex].concat(path);
-        if (this._cycleContainsLatticePoint(cycle))
-          results.push(path.map(point=>point.slice()));
-        return;
-      }
-      for (const nb of this._sameColorNeighbors(cur[0], cur[1], color)) {
-        const key = nb[0]+","+nb[1];
-        if ((nb[0]===avoid[0] && nb[1]===avoid[1]) || visited.has(key)) continue;
-        visited.add(key); path.push(nb);
-        dfs(nb, path);
-        path.pop(); visited.delete(key);
-      }
-    };
-    dfs(start, [start]);
-    return results;
   }
   _cycleContainsLatticePoint(cycle) {
     // 射线法: 环内部是否含 ≥1 个格点(顶点不算, 有无棋子都算)。ADR-0002
@@ -245,7 +209,7 @@ class JordanChess {
   }
   // 射线法: 半开区间规则 (y1>py)!=(y2>py), 奇数→内部
   static pointInPolygon(px, py, poly) {
-    // 射线法(半开区间规则), 用于 ADR-0002 的环内格点判定
+    // 射线法(半开区间规则), 当前规则不参与结算, 供规则变体使用
     let inside = false;
     const m = poly.length;
     for (let i = 0; i < m; i++) {
@@ -929,6 +893,27 @@ class SearchStateV3 {
       if (this.board[nb]===color) roots.push(dsu.find(nb));
     return roots;
   }
+  connectedBy2Edges(u,w,color) {
+    const dsu=this.dsu[color];
+    if (dsu.find(u)!==dsu.find(w)) return false;
+    const ux=u%this.n, uy=Math.floor(u/this.n), wx=w%this.n, wy=Math.floor(w/this.n);
+    if (Math.max(Math.abs(ux-wx),Math.abs(uy-wy))>=2) return true;
+    // 直接相邻: BFS 找 ≥2 边路径(第一跳不走 w), 排除 3 顶点三角形(ADR-0001)
+    const visited=new Set([u]);
+    let layer=[];
+    for (const nb of this.neighbors[u])
+      if (nb!==w && this.board[nb]===color) { visited.add(nb); layer.push(nb); }
+    while (layer.length) {
+      const nxt=[];
+      for (const cur of layer) {
+        if (cur===w) return true;
+        for (const nb of this.neighbors[cur])
+          if (this.board[nb]===color && !visited.has(nb)) { visited.add(nb); nxt.push(nb); }
+      }
+      layer=nxt;
+    }
+    return visited.has(w);
+  }
   // ADR-0002: 射线法(半开区间), 供环内格点判定
   static pointInPolygon(px,py,poly) {
     let inside=false;
@@ -963,7 +948,6 @@ class SearchStateV3 {
       if (cur===target) break;
       for (const nb of this.neighbors[cur]) {
         if (nb===avoid || parent.has(nb)) continue;
-        if (this.board[nb]!==color) continue;
         if (minEdges>1 && cur===start && nb===target) continue;
         parent.set(nb,cur); queue.push(nb);
       }
@@ -974,51 +958,37 @@ class SearchStateV3 {
     path.reverse(); return path;
   }
   // ADR-0002: 是否存在经过 move 的闭环且环内 ≥1 格点
-  enclosingCycleExists(move,color,budget=1200) {
+  enclosingCycleExists(move,color,budget=800) {
     const nbrs=[];
     for (const nb of this.neighbors[move])
       if (this.board[nb]===color) nbrs.push(nb);
-    if (nbrs.length<2) return false;
-    const groups=new Map(), dsu=this.dsu[color];
-    for (const nb of nbrs) {
-      const root=dsu.find(nb);
-      if (!groups.has(root)) groups.set(root,[]);
-      groups.get(root).push(nb);
-    }
     let steps=budget;
     const ok=(path)=>{ const cycle=[move].concat(path); return this.cycleContainsLatticePoint(cycle); };
-    for (const group of groups.values()) {
-      if (group.length<2) continue;
-      for (let i=0;i<group.length;i++)
-        for (let j=i+1;j<group.length;j++) {
-        if (steps<=0) return false;
-        const u=group[i], w=group[j];
+    for (let i=0;i<nbrs.length;i++)
+      for (let j=i+1;j<nbrs.length;j++) {
+        const u=nbrs[i], w=nbrs[j];
+        if (!this.connectedBy2Edges(u,w,color)) continue;
         const path=this.bfsPath(u,w,move,color,2);
         if (path!==null && ok(path)) return true;
-        // The shortest path can form an invalid tiny loop; seek a valid detour.
+        // DFS 补找绕行路径
         const visited=new Set([u]);
         const dfs=(cur,p)=>{
-          if (steps--<=0 || p.length>14) return false;
-          if (cur===w) return p.length>=3 && ok(p);
+          if (steps--<=0 || p.length>14) return;
+          if (cur===w) { if (ok(p)) throw null; return; }
           for (const nb of this.neighbors[cur]) {
             if (nb===move || visited.has(nb)) continue;
             if (this.board[nb]!==color) continue;
             visited.add(nb); p.push(nb);
-            const found=dfs(nb,p);
+            dfs(nb,p);
             p.pop(); visited.delete(nb);
-            if (found) return true;
           }
-          return false;
         };
-        if (dfs(u,[u])) return true;
+        try { dfs(u,[u]); } catch(e) { return true; }
       }
-    }
     return false;
   }
   isWinningMove(move,color) {
     if (this.board[move]!==EMPTY) return false;
-    const roots=this.sameColorRoots(move,color);
-    if (roots.length<2 || new Set(roots).size===roots.length) return false;
     return this.enclosingCycleExists(move,color);
   }
   winningMoves(color,limit=null) {
@@ -1030,10 +1000,10 @@ class SearchStateV3 {
     }
     return out;
   }
-  play(move,color,checkWin=true) {
+  play(move,color) {
     if (this.board[move]!==EMPTY) throw new Error("occupied V3 move");
     const dsu=this.dsu[color], snapshot=dsu.snapshot();
-    const won=checkWin?this.isWinningMove(move,color):false;
+    const won=this.isWinningMove(move,color);
     this.board[move]=color; this.emptyCount--;
     this.hash^=this.zobrist[move][color-1]; dsu.activate(move);
     for (const nb of this.neighbors[move])
@@ -1056,33 +1026,18 @@ class SearchStateV3 {
 }
 
 class JordanAI {
-  constructor(game,color,timeBudget=2.0,maxDepth=12,seed=1,variety=0) {
+  constructor(game,color,timeBudget=2.0,maxDepth=12,seed=1) {
     this.game=game; this.color=color;
     this.opp=(color===BLACK?WHITE:BLACK);
     this.timeBudget=timeBudget; this.maxDepth=maxDepth; this.seed=seed;
-    this.variety=Math.max(0,Math.min(1,Number(variety)||0));
-    this.rngState=(Number(seed)>>>0)||1;
     this.weights={fork:18000,t2:620,mergePoint:170,frontierEdge:26,
-      componentSquare:3,largestComponent:8,openDiamondOne:10,
-      openDiamondTwo:210,center:1};
+      componentSquare:3,largestComponent:8,openSquareOne:10,
+      openSquareTwo:210,center:1};
     this.historyScores=Array.from({length:3},()=>Array(game.n*game.n).fill(0));
     this.lastStats={completedDepth:0,nodes:0,ttHits:0,cutoffs:0,
       elapsed:0,score:0,pv:[]};
   }
   static other(color) { return color===BLACK?WHITE:BLACK; }
-  _random() {
-    let x=this.rngState;
-    x^=x<<13; x^=x>>>17; x^=x<<5;
-    this.rngState=x>>>0;
-    return this.rngState/4294967296;
-  }
-  _weightedPick(items,weights) {
-    let total=weights.reduce((sum,value)=>sum+value,0), pick=this._random()*total;
-    for (let i=0;i<items.length;i++) {
-      pick-=weights[i]; if (pick<=0) return items[i];
-    }
-    return items[items.length-1];
-  }
   _key(color) { return this.state.hash.toString(16)+"|"+color; }
   _checkTime() {
     if (performance.now()>=this.deadline) throw AI_TIMEOUT_V3;
@@ -1091,35 +1046,7 @@ class JordanAI {
     this.state=new SearchStateV3(this.game);
     this.tt=new Map(); this.analysisCache=new Map();
     this.tacticalCache=new Map(); this.featureCache=new Map();
-    this.killers=new Map(); this.rootScores=[];
-    this.nodes=0; this.ttHits=0; this.cutoffs=0;
-  }
-  _variedRootOrder(moves) {
-    const ordered=moves.slice();
-    if (this.variety<=0 || ordered.length<2) return ordered;
-    const width=Math.min(ordered.length,2+Math.round(4*this.variety));
-    for (let i=width-1;i>0;i--) {
-      const j=Math.floor(this._random()*(i+1));
-      [ordered[i],ordered[j]]=[ordered[j],ordered[i]];
-    }
-    return ordered;
-  }
-  _variedFallback(moves) {
-    if (this.variety<=0 || moves.length<2) return moves[0];
-    const width=Math.min(moves.length,2+Math.round(4*this.variety));
-    const pool=moves.slice(0,width);
-    return this._weightedPick(pool,pool.map((_,rank)=>Math.pow(0.62,rank)));
-  }
-  _variedCompletedMove(bestMove,bestScore) {
-    if (this.variety<=0 || !this.rootScores.length ||
-        Math.abs(bestScore)>=V3_MATE-100) return bestMove;
-    const margin=Math.max(40,Math.trunc(600*this.variety));
-    const candidates=this.rootScores.filter(item=>
-      item[1]>=bestScore-margin && item[1]>-V3_MATE/2);
-    if (candidates.length<2) return bestMove;
-    const temperature=Math.max(20,margin*0.55);
-    return this._weightedPick(candidates.map(item=>item[0]),
-      candidates.map(item=>Math.exp((item[1]-bestScore)/temperature)));
+    this.killers=new Map(); this.nodes=0; this.ttHits=0; this.cutoffs=0;
   }
   _analysis(color) {
     const key=this._key(color);
@@ -1139,8 +1066,8 @@ class JordanAI {
       const roots=nbrs.map(nb=>dsu.find(nb));
       const unique=[...new Set(roots)].sort((a,b)=>a-b);
       moveRoots.set(move,unique);
-      // Repeated component root is the cheap cycle prefilter; geometry is exact.
-      if (roots.length>unique.length && this.state.enclosingCycleExists(move,color)) {
+      // ADR-0002: 威胁 = 落子后存在含格点环
+      if (nbrs.length>=2 && this.state.enclosingCycleExists(move,color)) {
         threats.push(move);
       }
       for (const root of unique) {
@@ -1177,15 +1104,7 @@ class JordanAI {
         if (roots.some(root=>joined.has(root))) created.add(nb);
       }
       created.delete(move);
-      if (!created.size) continue;
-      const token=this.state.play(move,color,false), exact=[];
-      try {
-        for (const point of [...created].sort((a,b)=>a-b)) {
-          this._checkTime();
-          if (this.state.isWinningMove(point,color)) exact.push(point);
-        }
-      } finally { this.state.undo(token); }
-      if (exact.length) result.set(move,exact);
+      if (created.size) result.set(move,[...created].sort((a,b)=>a-b));
     }
     this.tacticalCache.set(key,result); return result;
   }
@@ -1215,26 +1134,26 @@ class JordanAI {
     let componentSquare=0;
     for (const size of analysis.componentSizes) componentSquare+=size*size;
     const largestComponent=analysis.componentSizes.length?analysis.componentSizes[0]:0;
-    let openDiamondOne=0, openDiamondTwo=0;
+    let openSquareOne=0, openSquareTwo=0;
     const n=this.state.n, board=this.state.board;
-    for (let x=1;x<n-1;x++) for (let y=1;y<n-1;y++) {
-      const values=[board[(x-1)*n+y],board[x*n+y-1],
-        board[(x+1)*n+y],board[x*n+y+1]];
+    for (let x=0;x<n-1;x++) for (let y=0;y<n-1;y++) {
+      const base=x*n+y;
+      const values=[board[base],board[base+n],board[base+1],board[base+n+1]];
       if (values.includes(opp)) continue;
       const count=values.filter(v=>v===color).length;
-      if (count===1) openDiamondOne++;
-      else if (count===2) openDiamondTwo++;
+      if (count===1) openSquareOne++;
+      else if (count===2) openSquareTwo++;
     }
     const result={forks,t2,mergePoints,frontierEdges,componentSquare,
-      largestComponent,openDiamondOne,openDiamondTwo,center:centerScore};
+      largestComponent,openSquareOne,openSquareTwo,center:centerScore};
     this.featureCache.set(key,result); return result;
   }
   _weighted(f) {
     const w=this.weights;
     return f.forks*w.fork+f.t2*w.t2+f.mergePoints*w.mergePoint+
       f.frontierEdges*w.frontierEdge+f.componentSquare*w.componentSquare+
-      f.largestComponent*w.largestComponent+f.openDiamondOne*w.openDiamondOne+
-      f.openDiamondTwo*w.openDiamondTwo+f.center*w.center;
+      f.largestComponent*w.largestComponent+f.openSquareOne*w.openSquareOne+
+      f.openSquareTwo*w.openSquareTwo+f.center*w.center;
   }
   _evaluate(color) {
     return this._weighted(this._features(color))-
@@ -1246,15 +1165,15 @@ class JordanAI {
     const theirs=this.state.sameColorRoots(move,opponent).length;
     const [x,y]=this.state.xy(move), center=(this.state.n-1)/2;
     const centrality=Math.trunc(4*this.state.n-2*Math.abs(x-center)-2*Math.abs(y-center));
-    let diamondGain=0, n=this.state.n;
-    for (const [cx,cy] of [[x-1,y],[x+1,y],[x,y-1],[x,y+1]]) {
-      if (cx<1||cx>=n-1||cy<1||cy>=n-1) continue;
-      const points=[(cx-1)*n+cy,cx*n+cy-1,(cx+1)*n+cy,cx*n+cy+1];
+    let squareGain=0, n=this.state.n;
+    for (const sx of [x-1,x]) for (const sy of [y-1,y]) {
+      if (sx<0||sx>=n-1||sy<0||sy>=n-1) continue;
+      const points=[sx*n+sy,(sx+1)*n+sy,sx*n+sy+1,(sx+1)*n+sy+1];
       const values=points.map(p=>this.state.board[p]);
-      if (!values.includes(opponent)) diamondGain+=16*values.filter(v=>v===color).length;
-      if (!values.includes(color)) diamondGain+=13*values.filter(v=>v===opponent).length;
+      if (!values.includes(opponent)) squareGain+=16*values.filter(v=>v===color).length;
+      if (!values.includes(color)) squareGain+=13*values.filter(v=>v===opponent).length;
     }
-    return 60*mine+42*theirs+centrality+diamondGain;
+    return 60*mine+42*theirs+centrality+squareGain;
   }
   _orderedMoves(color,depth,ply,tacticalOnly=false,ttMove=null,root=false) {
     const opponent=JordanAI.other(color);
@@ -1331,7 +1250,7 @@ class JordanAI {
     let best=-V3_INF,bestMove=moves[0];
     for (let index=0;index<moves.length;index++) {
       const move=moves[index]; this._checkTime();
-      const token=this.state.play(move,color,false); let score;
+      const token=this.state.play(move,color); let score;
       try {
         if (token.won) score=V3_MATE-ply;
         else if (index===0)
@@ -1357,10 +1276,9 @@ class JordanAI {
     if (entry && moves.includes(entry.move))
       moves=[entry.move,...moves.filter(move=>move!==entry.move)];
     let alpha=-V3_INF,beta=V3_INF,best=-V3_INF,bestMove=moves[0];
-    const scores=[];
     for (let index=0;index<moves.length;index++) {
       const move=moves[index]; this._checkTime();
-      const token=this.state.play(move,this.color,false); let score;
+      const token=this.state.play(move,this.color); let score;
       try {
         if (token.won) score=V3_MATE;
         else if (index===0) score=-this._pvs(depth-1,-beta,-alpha,this.opp,1);
@@ -1370,12 +1288,10 @@ class JordanAI {
             score=-this._pvs(depth-1,-beta,-alpha,this.opp,1);
         }
       } finally { this.state.undo(token); }
-      scores.push([move,score]);
       if (score>best) { best=score; bestMove=move; }
       if (score>alpha) alpha=score;
       if (score>=V3_MATE-2) break;
     }
-    this.rootScores=scores;
     this.tt.set(key,{depth,score:best,flag:0,move:bestMove});
     return [bestMove,best];
   }
@@ -1415,16 +1331,11 @@ class JordanAI {
         else {
           const tactical=this._tacticalMap(this.color);
           const forks=[...tactical.entries()].filter(item=>item[1].length>=2).map(item=>item[0]);
-          if (forks.length) {
-            completedMove=this.variety>0
-              ? forks[Math.floor(this._random()*forks.length)] : forks[0];
-            completedScore=V3_MATE-2;
-          }
+          if (forks.length) { completedMove=forks[0]; completedScore=V3_MATE-2; }
           else {
-            let moves=this._orderedMoves(this.color,1,0,false,null,true);
+            const moves=this._orderedMoves(this.color,1,0,false,null,true);
             if (moves.length) {
-              moves=this._variedRootOrder(moves);
-              completedMove=this._variedFallback(moves);
+              completedMove=moves[0];
               for (let depth=1;depth<=this.maxDepth;depth++) {
                 this._checkTime();
                 const [move,score]=this._searchRoot(depth,moves);
@@ -1436,8 +1347,6 @@ class JordanAI {
         }
       }
     } catch (error) { if (error!==AI_TIMEOUT_V3) throw error; }
-    if (completedDepth>0)
-      completedMove=this._variedCompletedMove(completedMove,completedScore);
     const pv=this._principalVariation();
     this.lastStats={completedDepth,nodes:this.nodes,ttHits:this.ttHits,
       cutoffs:this.cutoffs,elapsed:(performance.now()-started)/1000,
@@ -1460,7 +1369,7 @@ self.onmessage = event => {
     game.history = request.history.map(move => move.slice());
     game.winner = null;
     const ai = new JordanAI(game, request.color, request.timeBudget,
-      request.maxDepth, request.seed, request.variety);
+      request.maxDepth, request.seed);
     if (request.historyScores)
       ai.historyScores = request.historyScores.map(row => row.slice());
     const move = ai.chooseMove();
@@ -1499,7 +1408,6 @@ function startNewGame() {
   cancelPendingAI();
   game = new JordanChess(boardSize);
   resetAIMemory();
-  aiMatchSeed = freshAIMatchSeed();
   resizeCanvas();
   draw();
   statusEl.textContent = gameMode === MODE_AI_AI
@@ -1633,7 +1541,6 @@ let gameMode = MODE_LOCAL;
 let humanColor = BLACK;
 let aiMemory = {[BLACK]: null, [WHITE]: null};
 let aiGeneration = 0;
-let aiMatchSeed = 1;
 let aiThinking = false;
 let activeAIWorker = null;
 let activeAITimer = null;
@@ -1643,27 +1550,6 @@ const sideBtn = document.getElementById("side");
 function aiColor() { return humanColor === BLACK ? WHITE : BLACK; }
 function resetAIMemory() {
   aiMemory = {[BLACK]: null, [WHITE]: null};
-}
-function freshAIMatchSeed() {
-  if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === "function") {
-    const value = new Uint32Array(1);
-    globalThis.crypto.getRandomValues(value);
-    return value[0] || 1;
-  }
-  return ((Date.now() ^ Math.trunc(performance.now()*1000) ^
-    Math.imul(aiGeneration+1,0x9e3779b9))>>>0)||1;
-}
-function mixAISeed(value) {
-  let x=value>>>0;
-  x=Math.imul(x^(x>>>16),0x21f0aaad);
-  x=Math.imul(x^(x>>>15),0x735a2d97);
-  return (x^(x>>>15))>>>0||1;
-}
-function exhibitionVariety() {
-  if (gameMode!==MODE_AI_AI) return 0;
-  const base=boardSize>=24?0.9:(boardSize>=16?0.65:0.35);
-  const decay=Math.exp(-game.history.length/Math.max(18,boardSize*1.6));
-  return base*decay;
 }
 function cancelPendingAI() {
   aiGeneration++;
@@ -1751,18 +1637,12 @@ function scheduleAIMoveIfNeeded(delay = 30) {
       if (gameMode === MODE_AI_AI && game.winner === null)
         scheduleAIMoveIfNeeded(180);
     };
-    const exhibition = gameMode === MODE_AI_AI;
-    const moveSeed = exhibition
-      ? mixAISeed(aiMatchSeed ^ Math.imul(activeGame.history.length+1,0x9e3779b9)
-        ^ Math.imul(color,0x85ebca6b))
-      : 1;
     worker.postMessage({
       id:token, size:activeGame.size,
       board:activeGame.board.map(row => row.slice()),
       turn:activeGame.turn,
       history:activeGame.history.map(move => move.slice()),
-      color, timeBudget:2.0, maxDepth:12, seed:moveSeed,
-      variety:exhibitionVariety(),
+      color, timeBudget:2.0, maxDepth:12, seed:1,
       historyScores:aiMemory[color],
     });
   }, delay);
@@ -1786,7 +1666,7 @@ aiVsAiBtn.addEventListener("click", () => {
   draw();
   statusEl.textContent = pausing
     ? "AI-AI 对战已暂停；再次点击可继续。"
-    : "AI-AI 对战：受控变化已开启，每盘会从近似等价走法中产生不同变化。";
+    : "AI-AI 对战：两个 V3 AI 将自动轮流落子。";
   statusEl.classList.add("info");
   scheduleAIMoveIfNeeded();
 });

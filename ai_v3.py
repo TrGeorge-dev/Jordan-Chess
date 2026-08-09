@@ -129,10 +129,10 @@ class UndoToken:
 class SearchState:
     """Reversible flat-board representation with exact cycle detection.
 
-    The rollback DSU provides a cheap necessary condition for a cycle: two
-    same-colour neighbours of the move must already belong to one component.
-    ADR-0002 adds a geometric condition, so DSU candidates are always verified
-    by the enclosing-cycle detector before they are treated as wins.
+    For an empty point ``v``, playing color ``c`` closes a cycle iff two
+    c-coloured neighbours of ``v`` already belong to the same component.
+    The DSU therefore answers both move-terminal and T1-threat queries without
+    a board-wide BFS after every simulated move.
     """
 
     def __init__(self, game):
@@ -206,6 +206,22 @@ class SearchState:
         return tuple(dsu.find(nb) for nb in self.neighbors[move]
                      if self.board[nb] == color)
 
+    def connected_by_2_edges(self, u, w, color):
+        """u,w 同色且同分量: 判断是否存在 ≥2 条边的简单连通路径。
+
+        若 u,w 不相邻(切比雪夫距离 ≥2), 任何路径都 ≥2 条边;
+        若直接相邻, 需存在绕行路径(3 顶点三角形不算环, 见 ADR-0001)。
+        """
+        dsu = self.dsu[color]
+        if dsu.find(u) != dsu.find(w):
+            return False
+        ux, uy = self.xy(u)
+        wx, wy = self.xy(w)
+        if max(abs(ux - wx), abs(uy - wy)) >= 2:
+            return True
+        # u,w 直接相邻: BFS 找 ≥2 边路径(第一跳不走 w)
+        return self._reachable_without_first_edge(u, w, color)
+
     def bfs_path(self, start, target, avoid, color, min_edges=1):
         """BFS 返回 start→target 最短简单路径(避开 avoid); 不可达返回 None。"""
         parent = {start: None}
@@ -218,8 +234,6 @@ class SearchState:
                 break
             for nb in self.neighbors[cur]:
                 if nb == avoid or nb in parent:
-                    continue
-                if self.board[nb] != color:
                     continue
                 if min_edges > 1 and cur == start and nb == target:
                     continue
@@ -243,62 +257,43 @@ class SearchState:
         """
         nbrs = [nb for nb in self.neighbors[move]
                 if self.board[nb] == color]
-        if len(nbrs) < 2:
-            return False
-
-        # Only neighbours in the same pre-move component can close a cycle.
-        # Grouping first avoids BFS/DFS work for the overwhelmingly common
-        # disconnected pairs.
-        groups = defaultdict(list)
-        dsu = self.dsu[color]
-        for nb in nbrs:
-            groups[dsu.find(nb)].append(nb)
-        groups = [group for group in groups.values() if len(group) >= 2]
-        if not groups:
-            return False
-
-        steps = [budget if budget is not None else 1200]
+        steps = [budget if budget is not None else 800]
 
         def check(path):
             cycle = [move] + path
-            cy = [self.xy(i) for i in cycle]
+            cy = [(i % self.n, i // self.n) for i in cycle]
             return _cycle_contains_lattice_point(cy)
 
-        for group in groups:
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    if steps[0] <= 0:
-                        return False
-                    u, w = group[i], group[j]
-                    path = self.bfs_path(u, w, move, color, min_edges=2)
-                    if path is not None and check(path):
-                        return True
-                    # The shortest path can make a tiny invalid loop while a
-                    # longer detour encloses a lattice point. Stop on the first
-                    # valid detour instead of materialising every simple path.
-                    if self._enclosing_path_exists(
-                            u, w, move, color, move, steps):
+        for i in range(len(nbrs)):
+            for j in range(i + 1, len(nbrs)):
+                u, w = nbrs[i], nbrs[j]
+                if not self.connected_by_2_edges(u, w, color):
+                    continue
+                path = self.bfs_path(u, w, move, color, min_edges=2)
+                if path is not None and check(path):
+                    return True
+                # DFS 补找绕行路径
+                for p2 in self._simple_paths_enclosing(u, w, move, color, steps):
+                    if check(p2):
                         return True
         return False
 
-    def _enclosing_path_exists(self, start, target, avoid, color,
-                               closing_vertex, steps):
-        """Budgeted DFS for a detour that encloses at least one lattice point."""
+    def _simple_paths_enclosing(self, start, target, avoid, color, steps):
+        """DFS 枚举 start→target 简单路径, 供 enclosing_cycle_exists 补找。"""
+        results = []
         visited = {start}
         MAX_LEN = 14
+        MAX_PATHS = 30
 
         def dfs(cur, path):
             steps[0] -= 1
-            if steps[0] <= 0:
-                return False
+            if steps[0] <= 0 or len(results) >= MAX_PATHS:
+                return
             if len(path) > MAX_LEN:
-                return False
+                return
             if cur == target:
-                if len(path) < 3:  # cycle must contain at least four vertices
-                    return False
-                cycle = [closing_vertex] + path
-                return _cycle_contains_lattice_point(
-                    [self.xy(index) for index in cycle])
+                results.append(list(path))
+                return
             for nb in self.neighbors[cur]:
                 if nb == avoid or nb in visited:
                     continue
@@ -306,21 +301,39 @@ class SearchState:
                     continue
                 visited.add(nb)
                 path.append(nb)
-                found = dfs(nb, path)
+                dfs(nb, path)
                 path.pop()
                 visited.discard(nb)
-                if found:
-                    return True
-            return False
 
-        return dfs(start, [start])
+        dfs(start, [start])
+        return results
+
+    def _reachable_without_first_edge(self, start, target, color):
+        """BFS: start→target 是否存在 ≥2 条边的路径(第一跳不走 target)。
+
+        只沿同色格移动(target 方向相反也不限制, 即完整 BFS); 空点/异色
+        自动不可达, 等价于引擎的 _shortest_path(min_edges=2)。
+        """
+        visited = {start}
+        layer = [nb for nb in self.neighbors[start]
+                 if nb != target and self.board[nb] == color]
+        for nb in layer:
+            visited.add(nb)
+        while layer:
+            nxt = []
+            for cur in layer:
+                if cur == target:
+                    return True
+                for nb in self.neighbors[cur]:
+                    if self.board[nb] == color and nb not in visited:
+                        visited.add(nb)
+                        nxt.append(nb)
+            layer = nxt
+        return target in visited
 
     def is_winning_move(self, move, color):
         """落 move 是否形成有效闭环(环内 ≥1 格点, ADR-0002)。"""
         if self.board[move] != EMPTY:
-            return False
-        roots = self.same_color_roots(move, color)
-        if len(roots) < 2 or len(set(roots)) == len(roots):
             return False
         return self.enclosing_cycle_exists(move, color)
 
@@ -333,12 +346,12 @@ class SearchState:
                     break
         return tuple(result)
 
-    def play(self, move, color, check_win=True):
+    def play(self, move, color):
         if self.board[move] != EMPTY:
             raise ValueError(f"occupied move: {self.xy(move)}")
         dsu = self.dsu[color]
         snapshot = dsu.snapshot()
-        won = self.is_winning_move(move, color) if check_win else False
+        won = self.is_winning_move(move, color)
         self.board[move] = color
         self.empty_count -= 1
         self.hash ^= self.zobrist[move][color - 1]
@@ -375,8 +388,8 @@ class EvalWeights:
     frontier_edge: int = 26
     component_square: int = 3
     largest_component: int = 8
-    open_diamond_one: int = 10
-    open_diamond_two: int = 210
+    open_square_one: int = 10
+    open_square_two: int = 210
     center: int = 1
 
 
@@ -388,8 +401,8 @@ class PositionFeatures:
     frontier_edges: int
     component_square: int
     largest_component: int
-    open_diamond_one: int
-    open_diamond_two: int
+    open_square_one: int
+    open_square_two: int
     center: int
 
     def weighted(self, weights):
@@ -399,8 +412,8 @@ class PositionFeatures:
                 + self.frontier_edges * weights.frontier_edge
                 + self.component_square * weights.component_square
                 + self.largest_component * weights.largest_component
-                + self.open_diamond_one * weights.open_diamond_one
-                + self.open_diamond_two * weights.open_diamond_two
+                + self.open_square_one * weights.open_square_one
+                + self.open_square_two * weights.open_square_two
                 + self.center * weights.center)
 
 
@@ -428,15 +441,13 @@ class JordanSearchAI:
     UPPER = 2
 
     def __init__(self, game, color, time_budget=2.0, max_depth=12,
-                 seed=None, weights=None, variety=0.0):
+                 seed=None, weights=None):
         self.game = game
         self.color = color
         self.opp = WHITE if color == BLACK else BLACK
         self.time_budget = time_budget
         self.max_depth = max_depth
-        self.seed = 1 if seed is None else int(seed)
-        self.variety = max(0.0, min(1.0, float(variety)))
-        self.rng = random.Random(self.seed)
+        self.seed = seed
         self.weights = weights or EvalWeights()
         self.state = None
         self.deadline = 0.0
@@ -446,7 +457,6 @@ class JordanSearchAI:
         self.feature_cache = {}
         self.history_scores = [[0] * (game.n * game.n) for _ in range(3)]
         self.killers = {}
-        self.root_scores = ()
         self.nodes = 0
         self.tt_hits = 0
         self.cutoffs = 0
@@ -476,45 +486,7 @@ class JordanSearchAI:
         self.tactical_cache = {}
         self.feature_cache = {}
         self.killers = {}
-        self.root_scores = ()
         self.nodes = self.tt_hits = self.cutoffs = 0
-
-    def _varied_root_order(self, moves):
-        """Shuffle only the strongest root prefix in exhibition mode."""
-        ordered = list(moves)
-        if self.variety <= 0 or len(ordered) < 2:
-            return ordered
-        width = min(len(ordered), 2 + int(round(4 * self.variety)))
-        prefix = ordered[:width]
-        self.rng.shuffle(prefix)
-        return prefix + ordered[width:]
-
-    def _varied_fallback(self, moves):
-        """Pick a strong root fallback when no full search layer completes."""
-        if self.variety <= 0 or len(moves) < 2:
-            return moves[0]
-        width = min(len(moves), 2 + int(round(4 * self.variety)))
-        # Geometric rank bias keeps stronger candidates more likely while
-        # allowing each match seed to explore a different opening.
-        weights = [0.62 ** rank for rank in range(width)]
-        return self.rng.choices(moves[:width], weights=weights, k=1)[0]
-
-    def _varied_completed_move(self, best_move, best_score):
-        """Sample among near-equal searched moves, never across forced tactics."""
-        if self.variety <= 0 or not self.root_scores:
-            return best_move
-        if abs(best_score) >= MATE - 100:
-            return best_move
-        margin = max(40, int(600 * self.variety))
-        candidates = [(move, score) for move, score in self.root_scores
-                      if score >= best_score - margin and score > -MATE // 2]
-        if len(candidates) < 2:
-            return best_move
-        temperature = max(20.0, margin * 0.55)
-        weights = [pow(2.718281828, (score - best_score) / temperature)
-                   for _, score in candidates]
-        return self.rng.choices(
-            [move for move, _ in candidates], weights=weights, k=1)[0]
 
     def _threats(self, color, limit=None):
         """Compatibility API returning coordinate-form immediate wins."""
@@ -556,11 +528,10 @@ class JordanSearchAI:
                      if self.state.board[nb] == color]
             unique = tuple(sorted(set(roots)))
             move_roots[move] = unique
-            # A repeated root is the cheap graph-theoretic precondition for a
-            # new cycle. Only those candidates need the geometric ADR-0002
-            # check, which keeps exact threat scans fast on sparse boards.
-            if len(roots) > len(unique) and \
-                    self.state.enclosing_cycle_exists(move, color):
+            # 威胁 = 落子后存在含格点环(ADR-0002); 先按必要条件预筛
+            nbrs = [nb for nb in self.state.neighbors[move]
+                    if self.state.board[nb] == color]
+            if len(nbrs) >= 2 and self.state.enclosing_cycle_exists(move, color):
                 threats.append(move)
             for root in unique:
                 frontiers[root].add(move)
@@ -576,13 +547,7 @@ class JordanSearchAI:
         return threats if limit is None else threats[:limit]
 
     def _tactical_map(self, color):
-        """Map a move to the *exact* T1 points it creates after being played.
-
-        Component/frontier intersections cheaply generate a complete set of
-        graph-cycle candidates. ADR-0002 means that connectivity alone is no
-        longer sufficient, so every candidate is verified on the reversible
-        post-move state before it is exposed as a T2/fork.
-        """
+        """Map a move to the T1 points it creates after being played."""
         key = (self.state.hash, color)
         cached = self.tactical_cache.get(key)
         if cached is not None:
@@ -609,23 +574,8 @@ class JordanSearchAI:
                         analysis.move_roots.get(neighbor, ())):
                     created.add(neighbor)
             created.discard(move)
-            if not created:
-                continue
-
-            # ``analysis.threats`` is empty, so ``move`` cannot already win.
-            # Skip that duplicate check, update the rollback DSU once, and
-            # geometrically filter only the small candidate set above.
-            token = self.state.play(move, color, check_win=False)
-            try:
-                exact = []
-                for point in sorted(created):
-                    self._check_time()
-                    if self.state.is_winning_move(point, color):
-                        exact.append(point)
-            finally:
-                self.state.undo(token)
-            if exact:
-                result[move] = tuple(exact)
+            if created:
+                result[move] = tuple(sorted(created))
         self.tactical_cache[key] = result
         return result
 
@@ -658,26 +608,22 @@ class JordanSearchAI:
         sizes = self._component_sizes(color)
         component_square = sum(size * size for size in sizes)
         largest = max(sizes, default=0)
-        diamond_one = diamond_two = 0
+        square_one = square_two = 0
         n = self.state.n
         board = self.state.board
-        # The smallest valid ADR-0002 loop is a radius-one diamond around a
-        # lattice point. Unit-square templates are deliberately not rewarded:
-        # they contain no lattice point and cannot win under the current rule.
-        for x in range(1, n - 1):
-            for y in range(1, n - 1):
-                values = (board[(x - 1) * n + y],
-                          board[x * n + y - 1],
-                          board[(x + 1) * n + y],
-                          board[x * n + y + 1])
+        for x in range(n - 1):
+            for y in range(n - 1):
+                base = x * n + y
+                values = (board[base], board[base + n],
+                          board[base + 1], board[base + n + 1])
                 if opp in values:
                     continue
                 count = values.count(color)
-                diamond_one += count == 1
-                diamond_two += count == 2
+                square_one += count == 1
+                square_two += count == 2
         result = PositionFeatures(
             forks, t2, merge_points, frontier_edges, component_square,
-            largest, diamond_one, diamond_two, center_score)
+            largest, square_one, square_two, center_score)
         self.feature_cache[key] = result
         return result
 
@@ -694,21 +640,20 @@ class JordanSearchAI:
         center = (self.state.n - 1) / 2.0
         centrality = int(4 * self.state.n
                          - 2 * abs(x - center) - 2 * abs(y - center))
-        diamond_gain = 0
+        square_gain = 0
         n = self.state.n
-        # A move can be one of four vertices for each adjacent diamond centre.
-        for cx, cy in ((x - 1, y), (x + 1, y),
-                       (x, y - 1), (x, y + 1)):
-            if not (1 <= cx < n - 1 and 1 <= cy < n - 1):
-                continue
-            points = ((cx - 1) * n + cy, cx * n + cy - 1,
-                      (cx + 1) * n + cy, cx * n + cy + 1)
-            values = [self.state.board[p] for p in points]
-            if opponent not in values:
-                diamond_gain += 16 * values.count(color)
-            if color not in values:
-                diamond_gain += 13 * values.count(opponent)
-        return 60 * mine + 42 * theirs + centrality + diamond_gain
+        for sx in (x - 1, x):
+            for sy in (y - 1, y):
+                if not (0 <= sx < n - 1 and 0 <= sy < n - 1):
+                    continue
+                points = (sx * n + sy, (sx + 1) * n + sy,
+                          sx * n + sy + 1, (sx + 1) * n + sy + 1)
+                values = [self.state.board[p] for p in points]
+                if opponent not in values:
+                    square_gain += 16 * values.count(color)
+                if color not in values:
+                    square_gain += 13 * values.count(opponent)
+        return 60 * mine + 42 * theirs + centrality + square_gain
 
     def _ordered_moves(self, color, depth, ply, tactical_only=False,
                        tt_move=None, root=False):
@@ -834,9 +779,7 @@ class JordanSearchAI:
         best_move = moves[0]
         for index, move in enumerate(moves):
             self._check_time()
-            # This node already proved there is no immediate winning move, so
-            # repeating the expensive geometry check for every child is waste.
-            token = self.state.play(move, color, check_win=False)
+            token = self.state.play(move, color)
             try:
                 if token.won:
                     score = MATE - ply
@@ -873,10 +816,9 @@ class JordanSearchAI:
                                     if move != entry.move]
         alpha, beta = -INF, INF
         best, best_move = -INF, moves[0]
-        scores = []
         for index, move in enumerate(moves):
             self._check_time()
-            token = self.state.play(move, self.color, check_win=False)
+            token = self.state.play(move, self.color)
             try:
                 if token.won:
                     score = MATE
@@ -891,13 +833,11 @@ class JordanSearchAI:
                                           self.opp, 1)
             finally:
                 self.state.undo(token)
-            scores.append((move, score))
             if score > best:
                 best, best_move = score, move
             alpha = max(alpha, score)
             if score >= MATE - 2:
                 break
-        self.root_scores = tuple(scores)
         self.tt[root_key] = TTEntry(depth, best, self.EXACT, best_move)
         return best_move, best
 
@@ -955,15 +895,13 @@ class JordanSearchAI:
                     forks = [move for move, wins in tactical.items()
                              if len(wins) >= 2]
                     if forks:
-                        completed_move = (self.rng.choice(forks)
-                                          if self.variety > 0 else forks[0])
+                        completed_move = forks[0]
                         completed_score = MATE - 2
                     else:
                         moves = self._ordered_moves(
                             self.color, depth=1, ply=0, root=True)
                         if moves:
-                            moves = self._varied_root_order(moves)
-                            completed_move = self._varied_fallback(moves)
+                            completed_move = moves[0]
                             for depth in range(1, self.max_depth + 1):
                                 self._check_time()
                                 move, score = self._search_root(depth, moves)
@@ -973,10 +911,6 @@ class JordanSearchAI:
                                     break
         except SearchTimeout:
             pass
-
-        if completed_depth > 0:
-            completed_move = self._varied_completed_move(
-                completed_move, completed_score)
 
         pv = self._principal_variation()
         self.last_stats = {

@@ -19,64 +19,60 @@ function sameMove(a, b) {
   return a[0] === b[0] && a[1] === b[1];
 }
 
-// 对手已有唯一有效斜菱形威胁，必须占住闭环点。
+// 用户报告的“三子一排”陷阱：一侧已封，必须占住另一侧的双将点。
 {
   const game = new JordanChess(10);
-  for (const [x,y] of [[5,4],[4,5],[6,5]]) game.board[x][y] = BLACK;
-  game.board[0][0] = WHITE;
+  for (const [x,y] of [[4,4],[5,4],[6,4]]) game.board[x][y] = BLACK;
+  game.board[5][3] = WHITE;
   game.turn = WHITE;
-  game.history = [[5,4,BLACK],[0,0,WHITE],[4,5,BLACK],[0,1,WHITE],[6,5,BLACK]];
+  game.history = [[4,4,BLACK],[5,3,WHITE],[5,4,BLACK],[0,0,WHITE],[6,4,BLACK]];
   const ai = new JordanAI(game, WHITE, 0.2, 8, 1);
-  assert.ok(sameMove(ai.chooseMove(), [5,6]));
+  assert.ok(sameMove(ai.chooseMove(), [5,5]));
 }
 
-// 立即完成含一个内部格点的斜菱形。
+// 立即获胜。
 {
   const game = new JordanChess(10);
-  game.board[2][1] = BLACK;
-  game.board[1][2] = BLACK;
-  game.board[3][2] = BLACK;
+  game.board[2][2] = BLACK;
+  game.board[2][3] = BLACK;
+  game.board[3][3] = BLACK;
   const ai = new JordanAI(game, BLACK, 0.1, 6, 1);
-  assert.ok(sameMove(ai.chooseMove(), [2, 3]));
+  assert.ok(sameMove(ai.chooseMove(), [3, 2]));
 }
 
-// T2/fork 增量图必须与逐手模拟的精确含格点环判定一致。
+// 单邻居延伸 T2：旧版漏掉，新版必须识别。
 {
   const game = new JordanChess(5);
-  for (const [x,y] of [[2,2],[2,3],[3,3]]) game.board[x][y] = BLACK;
-  const ai = new JordanAI(game, BLACK, 5, 6, 1);
-  ai.deadline = performance.now() + 5000;
+  const black = [[2,1],[1,1],[0,1],[0,2],[0,3],[0,4],[1,4],[2,4]];
+  const white = [[1,2],[1,3]];
+  for (const [x,y] of black) game.board[x][y] = BLACK;
+  for (const [x,y] of white) game.board[x][y] = WHITE;
+  const ai = new JordanAI(game, BLACK, 0.2, 6, 1);
+  ai.deadline = performance.now() + 1000;
   ai._prepare();
-  const fast = [...ai._tacticalMap(BLACK).entries()];
-  const brute = [];
-  for (const move of ai.state.frontierMoves()) {
-    const token = ai.state.play(move, BLACK);
-    let wins;
-    try { wins = ai.state.winningMoves(BLACK, 3); }
-    finally { ai.state.undo(token); }
-    if (wins.length) brute.push([move, wins]);
-  }
-  assert.equal(JSON.stringify(fast), JSON.stringify(brute));
+  const t2 = [...ai._tacticalMap(BLACK).entries()]
+    .filter(item => item[1].length === 1).map(item => ai.state.xy(item[0]));
+  assert.ok(t2.some(move => sameMove(move, [2,2])));
+  const old = new LegacyJordanAI(game, BLACK, 0.2, 3, 1);
+  const [oldT2, oldForks] = old._t2AndForks(BLACK);
+  assert.ok(!oldT2.concat(oldForks).some(move => sameMove(move, [2,2])));
 }
 
-// 单位方格无效；中心弦也不能遮住外围有效斜菱形。
+// 多 fork 防守：新版比较后选择 (1,0)，旧版任取 (0,1)。
 {
-  const square = new JordanChess(2);
-  for (const [x,y] of [[0,0],[0,1],[1,1]]) square.board[x][y] = BLACK;
-  square.turn = BLACK;
-  assert.equal(square.place(1,0).winner, null);
-
-  const detour = new JordanChess(2);
-  for (const [x,y] of [[1,0],[1,1],[1,2],[2,1]]) detour.board[x][y] = BLACK;
-  detour.turn = BLACK;
-  assert.equal(detour.place(0,1).winner, BLACK);
-
-  const blocked = new JordanChess(2);
-  blocked.board[0][0] = blocked.board[0][2] = BLACK;
-  blocked.board[0][1] = WHITE;
-  const ai = new JordanAI(blocked, BLACK, 1, 2, 1);
-  ai.deadline = performance.now() + 1000; ai._prepare();
-  assert.equal(ai.state.bfsPath(0, 2, 8, BLACK), null);
+  const game = new JordanChess(4);
+  const history = [[0,0],[2,2],[3,1],[2,3],[2,0],[0,3],[3,3],
+                   [4,2],[1,1],[4,3],[4,4],[4,0],[1,2]];
+  for (const move of history) {
+    const result = game.place(...move);
+    assert.equal(result.winner, null);
+  }
+  const before = JSON.stringify(game.board);
+  const ai = new JordanAI(game, WHITE, 0.4, 8, 1);
+  assert.ok(sameMove(ai.chooseMove(), [1,0]));
+  assert.equal(JSON.stringify(game.board), before);
+  const old = new LegacyJordanAI(game, WHITE, 0.2, 3, 1);
+  assert.ok(sameMove(old.chooseMove(), [0,1]));
 }
 
 // 极短预算也必须恢复全部模拟棋子。
@@ -88,20 +84,6 @@ function sameMove(a, b) {
   const move = ai.chooseMove();
   assert.equal(JSON.stringify(game.board), before);
   assert.equal(game.board[move[0]][move[1]], EMPTY);
-}
-
-// 观赏模式随机性可复现、不同种子有变化，且不会覆盖强制胜着。
-{
-  const opening = seed => {
-    const game = new JordanChess(30);
-    return new JordanAI(game, BLACK, 0.2, 0, seed, 0.9).chooseMove().join(",");
-  };
-  assert.equal(opening(17), opening(17));
-  assert.ok(new Set(Array.from({length:8},(_,i)=>opening(i+1))).size >= 3);
-
-  const forced = new JordanChess(5);
-  for (const [x,y] of [[2,1],[1,2],[3,2]]) forced.board[x][y] = BLACK;
-  assert.ok(sameMove(new JordanAI(forced, BLACK, 0.2, 8, 99, 1).chooseMove(), [2,3]));
 }
 
 // AI-AI 界面模式：两个颜色必须自动轮流落子，暂停后旧计时器不得继续走。
@@ -143,9 +125,8 @@ function sameMove(a, b) {
   };
   const workers = [];
   class FakeWorker {
-    constructor() { this.terminated = false; this.request = null; workers.push(this); }
+    constructor() { this.terminated = false; workers.push(this); }
     postMessage(request) {
-      this.request = request;
       schedule(() => {
         if (this.terminated) return;
         let move = null;
@@ -194,8 +175,6 @@ function sameMove(a, b) {
   assert.ok(elements.aivai.classList.contains('on'));
   runNextTimer();
   assert.equal(workers.length, 1);
-  assert.ok(workers[0].request.variety > 0);
-  assert.ok(Number.isInteger(workers[0].request.seed));
   elements.aivai.click();
   while (timers.length) runNextTimer();
   assert.equal(workers[0].terminated, true);
@@ -215,4 +194,4 @@ function sameMove(a, b) {
   assert.equal(elements.aivai.textContent, 'AI-AI');
 }
 
-console.log('浏览器 AI: 7 项测试全部通过');
+console.log('浏览器 AI: 6 项测试全部通过');

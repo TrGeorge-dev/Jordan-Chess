@@ -101,8 +101,8 @@ class CrossLanguageParityTests(unittest.TestCase):
         self.assertEqual([
             features.forks, features.t2, features.merge_points,
             features.frontier_edges, features.component_square,
-            features.largest_component, features.open_diamond_one,
-            features.open_diamond_two, features.center,
+            features.largest_component, features.open_square_one,
+            features.open_square_two, features.center,
         ], html['features'])
 
     def test_random_positions_match_all_intermediate_results(self):
@@ -149,21 +149,21 @@ class CrossLanguageParityTests(unittest.TestCase):
                 self.assertEqual(expected, html['move'])
                 self.assertEqual(py_score, html['score'])
 
-    def test_valid_diamond_win_and_defense_match(self):
+    def test_reported_trap_and_multiple_fork_defense_match(self):
         trap = JordanChess(size=10)
-        for x, y in ((5, 4), (4, 5), (6, 5)):
+        for x, y in ((4, 4), (5, 4), (6, 4)):
             trap.board[x][y] = BLACK
-        trap.board[0][0] = WHITE
+        trap.board[5][3] = WHITE
         trap.turn = WHITE
-        trap.history = [(5, 4, BLACK)]
+        trap.history = [(4, 4, BLACK)]
 
-        win = JordanChess(size=5)
-        for x, y in ((2, 1), (1, 2), (3, 2)):
-            win.board[x][y] = BLACK
-        win.turn = BLACK
+        defense = JordanChess(size=4)
+        for move in ((0,0),(2,2),(3,1),(2,3),(2,0),(0,3),(3,3),
+                     (4,2),(1,1),(4,3),(4,4),(4,0),(1,2)):
+            self.assertIsNone(defense.place(*move)['winner'])
 
-        for game, color, expected in ((trap, WHITE, (5, 6)),
-                                      (win, BLACK, (2, 3))):
+        for game, color, expected in ((trap, WHITE, (5, 5)),
+                                      (defense, WHITE, (1, 0))):
             py = JordanSearchAI(game, color, time_budget=2.0,
                                 max_depth=12, seed=1)
             py_move = py.choose_move()

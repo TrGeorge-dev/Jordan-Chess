@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""约当棋引擎自测（规则: 形成内部含格点的闭环即获胜）。运行: python3 test_engine.py [-v]"""
+"""约当棋引擎自测（规则: 形成任何闭环即获胜）。运行: python3 test_engine.py [-v]"""
 
 import random
 import sys
@@ -116,17 +116,6 @@ def test_diamond_wins():
     assert len(r['loops']) >= 1
     for loop in r['loops']:
         check_cycle(g, loop, BLACK)
-
-
-def test_shortest_path_chord_does_not_hide_valid_loop():
-    """中心弦会产生更短的无效小环，但外围斜菱形仍应被补找出来。"""
-    g = JordanChess(size=2)
-    setup(g, {(1, 0): BLACK, (1, 1): BLACK,
-              (1, 2): BLACK, (2, 1): BLACK}, turn=BLACK)
-    r = g.place(0, 1)
-    assert r['ok'] and r['winner'] == BLACK
-    assert any(set(loop) == {(0, 1), (1, 0), (2, 1), (1, 2)}
-               for loop in r['loops'])
 
 
 def test_four_move_first_win():

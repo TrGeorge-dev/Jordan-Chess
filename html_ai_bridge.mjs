@@ -25,8 +25,7 @@ function makeGame(request) {
 function analyze(request) {
   const game = makeGame(request);
   const ai = new JordanAI(game, request.color,
-    request.budget ?? 2.0, request.maxDepth ?? 8, request.seed ?? 1,
-    request.variety ?? 0);
+    request.budget ?? 2.0, request.maxDepth ?? 8, request.seed ?? 1);
   ai.deadline = performance.now() + 30000;
   ai._prepare();
   const mine = ai._tacticalMap(request.color);
@@ -43,14 +42,13 @@ function analyze(request) {
     evaluation:ai._evaluate(request.color),
     features:(()=>{const f=ai._features(request.color); return [
       f.forks,f.t2,f.mergePoints,f.frontierEdges,f.componentSquare,
-      f.largestComponent,f.openDiamondOne,f.openDiamondTwo,f.center];})(),
+      f.largestComponent,f.openSquareOne,f.openSquareTwo,f.center];})(),
   };
 }
 
 function fixedDepth(request) {
   const game = makeGame(request);
-  const ai = new JordanAI(game, request.color, 30, request.depth,
-    request.seed ?? 1, request.variety ?? 0);
+  const ai = new JordanAI(game, request.color, 30, request.depth, request.seed ?? 1);
   ai.deadline = performance.now() + 30000;
   ai._prepare();
   const moves = ai._orderedMoves(request.color, 1, 0, false, null, true);
@@ -62,8 +60,7 @@ function fixedDepth(request) {
 function choose(request) {
   const game = makeGame(request);
   const ai = new JordanAI(game, request.color,
-    request.budget ?? 2.0, request.maxDepth ?? 8, request.seed ?? 1,
-    request.variety ?? 0);
+    request.budget ?? 2.0, request.maxDepth ?? 8, request.seed ?? 1);
   const before = JSON.stringify(game.board);
   const move = ai.chooseMove();
   if (JSON.stringify(game.board) !== before)
