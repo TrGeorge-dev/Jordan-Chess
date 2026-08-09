@@ -56,18 +56,54 @@ class SearchStateTests(unittest.TestCase):
 
     def test_cycle_is_reported_on_the_winning_play(self):
         game = JordanChess(size=5)
-        game.board[2][2] = BLACK
-        game.board[2][3] = BLACK
-        game.board[3][3] = BLACK
+        game.board[2][1] = BLACK
+        game.board[1][2] = BLACK
+        game.board[3][2] = BLACK
         state = SearchState(game)
-        move = state.index((3, 2))
+        move = state.index((2, 3))
         self.assertTrue(state.is_winning_move(move, BLACK))
         token = state.play(move, BLACK)
         self.assertTrue(token.won)
         state.undo(token)
 
+    def test_detour_cycle_is_not_hidden_by_shortest_path(self):
+        """A centre chord must not hide the valid outer diamond."""
+        game = JordanChess(size=2)
+        for x, y in ((1, 0), (1, 1), (1, 2), (2, 1)):
+            game.board[x][y] = BLACK
+        state = SearchState(game)
+        move = state.index((0, 1))
+        self.assertTrue(state.is_winning_move(move, BLACK))
+
+    def test_bfs_path_never_crosses_empty_or_opponent_points(self):
+        game = JordanChess(size=2)
+        game.board[0][0] = BLACK
+        game.board[0][2] = BLACK
+        game.board[0][1] = WHITE
+        state = SearchState(game)
+        self.assertIsNone(state.bfs_path(
+            state.index((0, 0)), state.index((0, 2)),
+            avoid=state.index((2, 2)), color=BLACK))
+
 
 class SearchAITests(unittest.TestCase):
+    def test_exhibition_variety_is_seeded_and_preserves_forced_wins(self):
+        def opening(seed):
+            game = JordanChess(size=30)
+            ai = JordanSearchAI(game, BLACK, time_budget=0.2,
+                                max_depth=0, seed=seed, variety=0.9)
+            return ai.choose_move()
+
+        self.assertEqual(opening(17), opening(17))
+        self.assertGreaterEqual(len({opening(seed) for seed in range(1, 9)}), 3)
+
+        forced = JordanChess(size=5)
+        for x, y in ((2, 1), (1, 2), (3, 2)):
+            forced.board[x][y] = BLACK
+        ai = JordanSearchAI(forced, BLACK, time_budget=0.2,
+                            seed=99, variety=1.0)
+        self.assertEqual((2, 3), ai.choose_move())
+
     def test_incremental_tactical_map_matches_simulation(self):
         rng = random.Random(9481)
         for sample in range(20):
@@ -96,21 +132,21 @@ class SearchAITests(unittest.TestCase):
 
     def test_takes_immediate_win(self):
         game = JordanChess(size=5)
-        game.board[2][2] = BLACK
-        game.board[2][3] = BLACK
-        game.board[3][3] = BLACK
+        game.board[2][1] = BLACK
+        game.board[1][2] = BLACK
+        game.board[3][2] = BLACK
         game.turn = BLACK
         ai = JordanSearchAI(game, BLACK, time_budget=0.2)
-        self.assertEqual((3, 2), ai.choose_move())
+        self.assertEqual((2, 3), ai.choose_move())
 
-    def test_blocks_reported_three_stone_trap(self):
+    def test_blocks_single_valid_diamond_threat(self):
         game = JordanChess(size=10)
-        for x, y in ((4, 4), (5, 4), (6, 4)):
+        for x, y in ((5, 4), (4, 5), (6, 5)):
             game.board[x][y] = BLACK
-        game.board[5][3] = WHITE
+        game.board[0][0] = WHITE
         game.turn = WHITE
         ai = JordanSearchAI(game, WHITE, time_budget=0.4)
-        self.assertEqual((5, 5), ai.choose_move())
+        self.assertEqual((5, 6), ai.choose_move())
 
     def test_search_does_not_mutate_game(self):
         game = JordanChess(size=8)

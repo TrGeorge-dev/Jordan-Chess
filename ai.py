@@ -649,7 +649,7 @@ class ThreatJordanAI(LegacyJordanAI):
         """一次扫描得到连通分量、T1 和各空点邻接的分量。
 
         move_roots[p] 是空点 p 四周接触到的不同同色连通分量。
-        若 p 同时接触同一分量中的两枚棋子，p 就是立即获胜点。
+        重复分量只作为成环候选；ADR-0002 的环内格点条件由引擎精确复核。
         """
         g = self.game
         n = g.n
@@ -690,7 +690,12 @@ class ThreatJordanAI(LegacyJordanAI):
                 unique = frozenset(roots)
                 move_roots[(x, y)] = unique
                 if len(unique) < len(roots):
-                    threats.append((x, y))
+                    b[x][y] = color
+                    try:
+                        if g._find_new_cycles(x, y, color, max_cycles=1):
+                            threats.append((x, y))
+                    finally:
+                        b[x][y] = EMPTY
                 for root in unique:
                     frontiers[root].add((x, y))
 
@@ -753,7 +758,9 @@ class ThreatJordanAI(LegacyJordanAI):
 
             # 即使只接触一个己方分量，也可能在新棋旁边制造 T1。
             for nx, ny in ((x - 1, y), (x + 1, y),
-                           (x, y - 1), (x, y + 1)):
+                           (x, y - 1), (x, y + 1),
+                           (x - 1, y - 1), (x - 1, y + 1),
+                           (x + 1, y - 1), (x + 1, y + 1)):
                 if not (0 <= nx < n and 0 <= ny < n):
                     continue
                 q = (nx, ny)
@@ -763,8 +770,24 @@ class ThreatJordanAI(LegacyJordanAI):
                     created.add(q)
 
             created.discard(move)  # move 落子后已不再是空点。
-            if created:
-                result[move] = tuple(sorted(created))
+            if not created:
+                continue
+
+            self._play(move, color)
+            try:
+                exact = []
+                for qx, qy in sorted(created):
+                    b[qx][qy] = color
+                    try:
+                        if self.game._find_new_cycles(
+                                qx, qy, color, max_cycles=1):
+                            exact.append((qx, qy))
+                    finally:
+                        b[qx][qy] = EMPTY
+            finally:
+                self._unplay(move, color)
+            if exact:
+                result[move] = tuple(exact)
 
         self._threat_map_cache[key] = result
         return result
@@ -1142,49 +1165,8 @@ class HybridJordanAI(LegacyJordanAI):
         return all(cell != EMPTY for row in self.game.board for cell in row)
 
     def _threats(self, color, limit=None):
-        """与 HTML 一样，达到 limit 后立即返回，不继续扫描棋盘。"""
-        n = self.game.n
-        b = self.game.board
-        dsu = self._build_dsu(color)
-        idx = self._idx
-        result = []
-        for x in range(n):
-            for y in range(n):
-                if b[x][y] != EMPTY:
-                    continue
-                neighbors = []
-                if x > 0 and b[x - 1][y] == color:
-                    neighbors.append(idx(x - 1, y))
-                if x < n - 1 and b[x + 1][y] == color:
-                    neighbors.append(idx(x + 1, y))
-                if y > 0 and b[x][y - 1] == color:
-                    neighbors.append(idx(x, y - 1))
-                if y < n - 1 and b[x][y + 1] == color:
-                    neighbors.append(idx(x, y + 1))
-                if x > 0 and y > 0 and b[x - 1][y - 1] == color:
-                    neighbors.append(idx(x - 1, y - 1))
-                if x > 0 and y < n - 1 and b[x - 1][y + 1] == color:
-                    neighbors.append(idx(x - 1, y + 1))
-                if x < n - 1 and y > 0 and b[x + 1][y - 1] == color:
-                    neighbors.append(idx(x + 1, y - 1))
-                if x < n - 1 and y < n - 1 and b[x + 1][y + 1] == color:
-                    neighbors.append(idx(x + 1, y + 1))
-                if len(neighbors) < 2:
-                    continue
-                hit = False
-                for i in range(len(neighbors) - 1):
-                    root = dsu.find(neighbors[i])
-                    for j in range(i + 1, len(neighbors)):
-                        if root == dsu.find(neighbors[j]):
-                            hit = True
-                            break
-                    if hit:
-                        break
-                if hit:
-                    result.append((x, y))
-                    if limit is not None and len(result) >= limit:
-                        return result
-        return result
+        """使用 Legacy 的引擎精确判定，避免把无内部格点的小环当作 T1。"""
+        return LegacyJordanAI._threats(self, color, limit)
 
     # ------------------------------------------------------------------
     # HTML 的完整战术预计算

@@ -8,7 +8,7 @@ import time
 import traceback
 
 from engine import JordanChess, BLACK, WHITE, EMPTY
-from ai import JordanAI, LegacyJordanAI
+from ai import JordanAI, LegacyJordanAI, ThreatJordanAI, HybridJordanAI
 
 
 def setup(game, pieces, turn=BLACK):
@@ -68,6 +68,21 @@ def test_ai_blocks_single_threat():
     mv = ai.choose_move()
     assert mv in threats_white or len(threats_white) >= 2, \
         f'应堵白方威胁点 {threats_white}, 实际走 {mv}'
+
+
+def test_regression_ais_follow_lattice_point_rule():
+    """保留的三代回归 AI 也不能把单位方格误报为胜点。"""
+    classes = (LegacyJordanAI, ThreatJordanAI, HybridJordanAI)
+    for cls in classes:
+        unit = JordanChess(size=5)
+        setup(unit, {(2, 2): BLACK, (2, 3): BLACK,
+                     (3, 3): BLACK}, turn=BLACK)
+        assert (3, 2) not in cls(unit, BLACK, seed=1)._threats(BLACK)
+
+        diamond = JordanChess(size=5)
+        setup(diamond, {(2, 1): BLACK, (1, 2): BLACK,
+                        (3, 2): BLACK}, turn=BLACK)
+        assert (2, 3) in cls(diamond, BLACK, seed=1)._threats(BLACK)
 
 
 # 注: 以下两个测试(单邻居 T2 / 多 fork 防守)是四连通规则下的战术构造。
