@@ -28,6 +28,34 @@ MATE = 1_000_000
 INF = 1_100_000
 
 
+def _point_in_polygon(px, py, poly):
+    """射线法(与引擎一致): 半开区间规则, 奇数→内部。"""
+    inside = False
+    m = len(poly)
+    for i in range(m):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % m]
+        if (y1 > py) != (y2 > py):
+            xi = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+            if xi > px:
+                inside = not inside
+    return inside
+
+
+def _cycle_contains_lattice_point(cycle_xy):
+    """环(坐标列表)内部是否包含 ≥1 个格点(顶点不算, 有无棋子都算)。ADR-0002。"""
+    on_loop = set(cycle_xy)
+    xs = [p[0] for p in cycle_xy]
+    ys = [p[1] for p in cycle_xy]
+    for x in range(min(xs), max(xs) + 1):
+        for y in range(min(ys), max(ys) + 1):
+            if (x, y) in on_loop:
+                continue
+            if _point_in_polygon(x, y, cycle_xy):
+                return True
+    return False
+
+
 class SearchTimeout(Exception):
     """Raised only to discard an unfinished iterative-deepening pass."""
 
@@ -126,6 +154,7 @@ class SearchState:
         self._build_components()
 
     def _make_neighbors(self, index):
+        """八连通邻居表(ADR-0001: 含对角)。用 index 加减定位。"""
         x, y = divmod(index, self.n)
         result = []
         if x > 0:
@@ -136,6 +165,14 @@ class SearchState:
             result.append(index - 1)
         if y + 1 < self.n:
             result.append(index + 1)
+        if x > 0 and y > 0:
+            result.append(index - self.n - 1)
+        if x > 0 and y + 1 < self.n:
+            result.append(index - self.n + 1)
+        if x + 1 < self.n and y > 0:
+            result.append(index + self.n - 1)
+        if x + 1 < self.n and y + 1 < self.n:
+            result.append(index + self.n + 1)
         return tuple(result)
 
     def _make_zobrist(self):
@@ -152,11 +189,9 @@ class SearchState:
         for index, color in enumerate(self.board):
             if color == EMPTY:
                 continue
-            x, y = divmod(index, self.n)
-            if x + 1 < self.n and self.board[index + self.n] == color:
-                self.dsu[color].union(index, index + self.n)
-            if y + 1 < self.n and self.board[index + 1] == color:
-                self.dsu[color].union(index, index + 1)
+            for nb in self.neighbors[index]:
+                if self.board[nb] == color:
+                    self.dsu[color].union(index, nb)
         self.dsu[BLACK].clear_history()
         self.dsu[WHITE].clear_history()
 
@@ -171,11 +206,136 @@ class SearchState:
         return tuple(dsu.find(nb) for nb in self.neighbors[move]
                      if self.board[nb] == color)
 
+    def connected_by_2_edges(self, u, w, color):
+        """u,w 同色且同分量: 判断是否存在 ≥2 条边的简单连通路径。
+
+        若 u,w 不相邻(切比雪夫距离 ≥2), 任何路径都 ≥2 条边;
+        若直接相邻, 需存在绕行路径(3 顶点三角形不算环, 见 ADR-0001)。
+        """
+        dsu = self.dsu[color]
+        if dsu.find(u) != dsu.find(w):
+            return False
+        ux, uy = self.xy(u)
+        wx, wy = self.xy(w)
+        if max(abs(ux - wx), abs(uy - wy)) >= 2:
+            return True
+        # u,w 直接相邻: BFS 找 ≥2 边路径(第一跳不走 w)
+        return self._reachable_without_first_edge(u, w, color)
+
+    def bfs_path(self, start, target, avoid, color, min_edges=1):
+        """BFS 返回 start→target 最短简单路径(避开 avoid); 不可达返回 None。"""
+        parent = {start: None}
+        queue = [start]
+        head = 0
+        while head < len(queue):
+            cur = queue[head]
+            head += 1
+            if cur == target:
+                break
+            for nb in self.neighbors[cur]:
+                if nb == avoid or nb in parent:
+                    continue
+                if min_edges > 1 and cur == start and nb == target:
+                    continue
+                parent[nb] = cur
+                queue.append(nb)
+        if target not in parent:
+            return None
+        path = []
+        cur = target
+        while cur is not None:
+            path.append(cur)
+            cur = parent[cur]
+        path.reverse()
+        return path
+
+    def enclosing_cycle_exists(self, move, color, budget=None):
+        """是否存在经过 move 的闭环且环内 ≥1 格点(ADR-0002)。
+
+        对每对邻居 (u,w): BFS 最短路径环含格点 → True;
+        否则 DFS 枚举绕行路径补找(预算保护)。
+        """
+        nbrs = [nb for nb in self.neighbors[move]
+                if self.board[nb] == color]
+        steps = [budget if budget is not None else 800]
+
+        def check(path):
+            cycle = [move] + path
+            cy = [(i % self.n, i // self.n) for i in cycle]
+            return _cycle_contains_lattice_point(cy)
+
+        for i in range(len(nbrs)):
+            for j in range(i + 1, len(nbrs)):
+                u, w = nbrs[i], nbrs[j]
+                if not self.connected_by_2_edges(u, w, color):
+                    continue
+                path = self.bfs_path(u, w, move, color, min_edges=2)
+                if path is not None and check(path):
+                    return True
+                # DFS 补找绕行路径
+                for p2 in self._simple_paths_enclosing(u, w, move, color, steps):
+                    if check(p2):
+                        return True
+        return False
+
+    def _simple_paths_enclosing(self, start, target, avoid, color, steps):
+        """DFS 枚举 start→target 简单路径, 供 enclosing_cycle_exists 补找。"""
+        results = []
+        visited = {start}
+        MAX_LEN = 14
+        MAX_PATHS = 30
+
+        def dfs(cur, path):
+            steps[0] -= 1
+            if steps[0] <= 0 or len(results) >= MAX_PATHS:
+                return
+            if len(path) > MAX_LEN:
+                return
+            if cur == target:
+                results.append(list(path))
+                return
+            for nb in self.neighbors[cur]:
+                if nb == avoid or nb in visited:
+                    continue
+                if self.board[nb] != color:
+                    continue
+                visited.add(nb)
+                path.append(nb)
+                dfs(nb, path)
+                path.pop()
+                visited.discard(nb)
+
+        dfs(start, [start])
+        return results
+
+    def _reachable_without_first_edge(self, start, target, color):
+        """BFS: start→target 是否存在 ≥2 条边的路径(第一跳不走 target)。
+
+        只沿同色格移动(target 方向相反也不限制, 即完整 BFS); 空点/异色
+        自动不可达, 等价于引擎的 _shortest_path(min_edges=2)。
+        """
+        visited = {start}
+        layer = [nb for nb in self.neighbors[start]
+                 if nb != target and self.board[nb] == color]
+        for nb in layer:
+            visited.add(nb)
+        while layer:
+            nxt = []
+            for cur in layer:
+                if cur == target:
+                    return True
+                for nb in self.neighbors[cur]:
+                    if self.board[nb] == color and nb not in visited:
+                        visited.add(nb)
+                        nxt.append(nb)
+            layer = nxt
+        return target in visited
+
     def is_winning_move(self, move, color):
+        """落 move 是否形成有效闭环(环内 ≥1 格点, ADR-0002)。"""
         if self.board[move] != EMPTY:
             return False
-        roots = self.same_color_roots(move, color)
-        return len(roots) != len(set(roots))
+        return self.enclosing_cycle_exists(move, color)
 
     def winning_moves(self, color, limit=None):
         result = []
@@ -191,8 +351,7 @@ class SearchState:
             raise ValueError(f"occupied move: {self.xy(move)}")
         dsu = self.dsu[color]
         snapshot = dsu.snapshot()
-        roots = self.same_color_roots(move, color)
-        won = len(roots) != len(set(roots))
+        won = self.is_winning_move(move, color)
         self.board[move] = color
         self.empty_count -= 1
         self.hash ^= self.zobrist[move][color - 1]
@@ -364,11 +523,15 @@ class JordanSearchAI:
         for move, value in enumerate(self.state.board):
             if value != EMPTY:
                 continue
+            self._check_time()               # 预算检查: 防止分析拖垮搜索
             roots = [dsu.find(nb) for nb in self.state.neighbors[move]
                      if self.state.board[nb] == color]
             unique = tuple(sorted(set(roots)))
             move_roots[move] = unique
-            if len(unique) < len(roots):
+            # 威胁 = 落子后存在含格点环(ADR-0002); 先按必要条件预筛
+            nbrs = [nb for nb in self.state.neighbors[move]
+                    if self.state.board[nb] == color]
+            if len(nbrs) >= 2 and self.state.enclosing_cycle_exists(move, color):
                 threats.append(move)
             for root in unique:
                 frontiers[root].add(move)

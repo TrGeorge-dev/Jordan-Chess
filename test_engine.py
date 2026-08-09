@@ -20,12 +20,12 @@ def setup(game, pieces, turn=BLACK):
 
 
 def check_cycle(game, cycle, color):
-    """校验闭环的数学性质: 顶点互异(不自交)、相邻顶点曼哈顿距离 1、全为同色。"""
+    """校验闭环: 顶点互异、相邻顶点八连通(切比雪夫距离 1)、全为同色。"""
     assert len(cycle) >= 4, f'闭环至少 4 个顶点: {cycle}'
-    assert len(set(cycle)) == len(cycle), f'闭环存在重复顶点(自交): {cycle}'
+    assert len(set(cycle)) == len(cycle), f'闭环存在重复顶点: {cycle}'
     for i in range(len(cycle)):
         a, b = cycle[i], cycle[(i + 1) % len(cycle)]
-        assert abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1, \
+        assert max(abs(a[0] - b[0]), abs(a[1] - b[1])) == 1, \
             f'闭环相邻顶点不相连: {a} - {b}'
         assert game.board[a[0]][a[1]] == color, f'闭环顶点 {a} 非己方棋子'
 
@@ -56,49 +56,79 @@ def test_no_cycle_scattered():
     assert g.winner is None and g.turn == BLACK
 
 
-def test_diagonal_not_connected():
+def test_triangle_not_a_loop():
+    """3 顶点三角形(八连通)不算闭环: 环至少 4 个顶点。"""
     g = JordanChess()
     setup(g, {(2, 2): BLACK, (3, 3): BLACK}, turn=BLACK)
-    r = g.place(2, 3)                          # 折线 (2,2)-(2,3)-(3,3), 非环
+    r = g.place(2, 3)          # (2,2)-(2,3)-(3,3) 三角形, 3 顶点
     assert r['ok'] and r['loops'] == [] and g.winner is None
 
 
-def test_connectivity_component():
+def test_diagonal_connectivity():
+    """斜向相邻现在视为连通(ADR-0001 八连通)。"""
     g = JordanChess()
-    setup(g, {(1, 1): BLACK, (1, 2): BLACK, (2, 2): BLACK,
-              (5, 5): BLACK, (6, 5): BLACK, (9, 9): WHITE})
+    setup(g, {(1, 1): BLACK, (2, 2): BLACK, (5, 5): BLACK,
+              (6, 5): BLACK, (9, 9): WHITE})
     comp = g._component((1, 1), avoid=None, color=BLACK)
-    assert comp == {(1, 1), (1, 2), (2, 2)}    # 斜向不连通, 两簇互不相连
+    assert comp == {(1, 1), (2, 2)}            # 斜对角连通
+    assert g._component((5, 5), avoid=None, color=BLACK) == {(5, 5), (6, 5)}
+
+
+def test_x_shape_no_win():
+    """X 形 4 子(两条对角线交叉)内部无格点 → 不构成闭环(ADR-0002)。"""
+    g = JordanChess()
+    setup(g, {(2, 2): BLACK, (3, 3): BLACK, (3, 2): BLACK}, turn=BLACK)
+    r = g.place(2, 3)          # 第 4 子: X 形 (2,2)(3,3)(3,2)(2,3)
+    assert r['ok'] and r['winner'] is None and r['loops'] == []
+    assert g.turn == WHITE
+
+
+def test_checkerboard_inevitably_loops():
+    """棋盘格填色在八连通下必然存在环(斜对角同色) —— 旧平局形态消失。"""
+    g = JordanChess()
+    for x in range(11):
+        for y in range(11):
+            g.board[x][y] = BLACK if (x + y) % 2 == 0 else WHITE
+    g.board[5][5] = EMPTY
+    g.turn = BLACK
+    r = g.place(5, 5)          # 棋盘格中任意落子即成环
+    assert r['ok'] and r['winner'] == BLACK and len(r['loops']) >= 1
 
 
 # ---------------------------------------------------------------------------
 # 闭环即胜: 核心规则
 # ---------------------------------------------------------------------------
-def test_unit_square_wins():
-    """4 枚棋子围成单位方格(内部无任何对方棋子) → 立即获胜。"""
+def test_unit_square_no_win():
+    """4 子单位方格内部无格点 → 不构成闭环(ADR-0002: 环内需 ≥1 格点)。"""
     g = JordanChess()
     setup(g, {(2, 2): BLACK, (2, 3): BLACK, (3, 3): BLACK}, turn=BLACK)
     r = g.place(3, 2)
-    assert r['ok'] and len(r['loops']) == 1
-    loop = r['loops'][0]
-    assert len(loop) == 4
-    check_cycle(g, loop, BLACK)
-    assert r['winner'] == BLACK                # 空环也获胜
-    assert g.get(3, 2) == BLACK                # 棋子保留(无移除)
-    assert not g.place(0, 0)['ok']             # 游戏结束
+    assert r['ok'] and r['winner'] is None and r['loops'] == []
+    assert g.turn == WHITE
+
+
+def test_diamond_wins():
+    """4 子斜菱形(内部恰 1 格点) → 立即获胜(ADR-0002 下最小有效环)。"""
+    g = JordanChess()
+    setup(g, {(2, 1): BLACK, (1, 2): BLACK, (3, 2): BLACK}, turn=BLACK)
+    r = g.place(2, 3)          # 斜菱形 (2,1)(1,2)(3,2)(2,3), 内部 (2,2)
+    assert r['ok'] and r['winner'] == BLACK
+    assert len(r['loops']) >= 1
+    for loop in r['loops']:
+        check_cycle(g, loop, BLACK)
 
 
 def test_four_move_first_win():
-    """真实回合交替下, 黑方第 4 手即可获胜(对手未阻挡时)。"""
+    """真实回合交替下, 黑方第 4 手即可获胜(对手未阻挡时, 斜菱形)。"""
     g = JordanChess()
-    assert g.place(2, 2)['ok']
-    assert g.place(0, 0)['ok']
-    assert g.place(2, 3)['ok']
-    assert g.place(0, 1)['ok']
-    assert g.place(3, 3)['ok']
-    assert g.place(0, 2)['ok']
-    r = g.place(3, 2)                          # 黑方第 4 子: 完成单位方格
-    assert r['ok'] and r['winner'] == BLACK and len(r['loops']) == 1
+    assert g.place(2, 1)['ok']   # 黑 1
+    assert g.place(0, 0)['ok']   # 白 1
+    assert g.place(1, 2)['ok']   # 黑 2
+    assert g.place(0, 1)['ok']   # 白 2
+    assert g.place(3, 2)['ok']   # 黑 3
+    assert g.place(0, 2)['ok']   # 白 3
+    r = g.place(2, 3)                          # 黑 4: 斜菱形完成, 内部 (2,2)
+    assert r['ok'] and r['winner'] == BLACK and len(r['loops']) >= 1
 
 
 def test_loop_around_opponent_no_removal():
@@ -109,7 +139,7 @@ def test_loop_around_opponent_no_removal():
               (5, 5): WHITE}, turn=BLACK)
     r = g.place(4, 5)
     assert r['ok'] and r['winner'] == BLACK
-    assert len(r['loops']) == 1 and len(r['loops'][0]) == 8
+    assert len(r['loops']) >= 1                # 八连通下斜边产生多个环
     assert g.get(5, 5) == WHITE                # 被围白子不移除
     assert g.get(4, 5) == BLACK
 
@@ -134,19 +164,19 @@ def test_loop_with_tail():
               (3, 3): WHITE}, turn=BLACK)
     r = g.place(2, 3)
     assert r['ok'] and r['winner'] == BLACK
-    assert len(r['loops']) == 1 and len(r['loops'][0]) == 8
+    assert len(r['loops']) >= 1                # 八连通下环形态多样
     assert g.get(3, 3) == WHITE                # 环内棋子不移除
 
 
 def test_loop_touching_border_valid():
-    """环完全由棋子闭合, 贴着棋盘边缘也是有效约当曲线。"""
+    """环完全由棋子闭合, 贴着棋盘边缘也是有效闭环。"""
     g = JordanChess()
     setup(g, {(0, 0): BLACK, (1, 0): BLACK, (2, 0): BLACK, (2, 1): BLACK,
               (2, 2): BLACK, (1, 2): BLACK, (0, 2): BLACK,
               (1, 1): WHITE}, turn=BLACK)
     r = g.place(0, 1)
     assert r['ok'] and r['winner'] == BLACK
-    assert len(r['loops']) == 1
+    assert len(r['loops']) >= 1
 
 
 def test_multiple_loops_detected():
@@ -161,7 +191,7 @@ def test_multiple_loops_detected():
     }, turn=BLACK)
     r = g.place(4, 4)                          # v: 两环的公共端点
     assert r['ok'] and r['winner'] == BLACK
-    assert len(r['loops']) == 3                # 环A + 环B + 外包环
+    assert len(r['loops']) >= 3                # 八连通下环数只多不少
     for loop in r['loops']:
         check_cycle(g, loop, BLACK)
 
@@ -178,7 +208,7 @@ def test_figure8_shared_vertex_no_big_loop():
     }, turn=BLACK)
     r = g.place(4, 4)
     assert r['ok'] and r['winner'] == BLACK
-    assert len(r['loops']) == 2
+    assert len(r['loops']) >= 2                # 八连通下环数只多不少
 
 
 # ---------------------------------------------------------------------------
@@ -229,15 +259,15 @@ def test_undo():
 def test_undo_after_win():
     """悔棋可撤销获胜一步: 闭环消失, 对局继续。"""
     g = JordanChess()
-    setup(g, {(2, 2): BLACK, (2, 3): BLACK, (3, 3): BLACK}, turn=BLACK)
-    r = g.place(3, 2)
+    setup(g, {(2, 1): BLACK, (1, 2): BLACK, (3, 2): BLACK}, turn=BLACK)
+    r = g.place(2, 3)                          # 斜菱形获胜
     assert r['winner'] == BLACK
     assert g.undo()
     assert g.winner is None
-    assert g.get(3, 2) == EMPTY                # 获胜落子撤销
+    assert g.get(2, 3) == EMPTY                # 获胜落子撤销
     assert g.turn == BLACK                     # 回到黑方
     # 原三子仍在, 可继续对局
-    assert g.get(2, 2) == BLACK and g.get(3, 3) == BLACK
+    assert g.get(2, 1) == BLACK and g.get(3, 2) == BLACK
 
 
 def test_draw():
@@ -271,10 +301,10 @@ def test_custom_size_basics():
 
 def test_custom_size_loop():
     g = JordanChess(size=2)                  # 最小可成环棋盘: 3×3 格点
-    setup(g, {(0, 0): BLACK, (0, 1): BLACK, (1, 1): BLACK}, turn=BLACK)
-    r = g.place(1, 0)                        # 单位方格闭环
+    setup(g, {(0, 1): BLACK, (1, 0): BLACK, (2, 1): BLACK}, turn=BLACK)
+    r = g.place(1, 2)                        # 斜菱形闭环, 内部 (1,1)
     assert r['ok'] and r['winner'] == BLACK
-    assert len(r['loops']) == 1 and len(r['loops'][0]) == 4
+    assert len(r['loops']) >= 1
 
 
 def test_custom_size_draw():

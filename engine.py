@@ -129,9 +129,13 @@ class JordanChess:
     # 连通性检测 (BFS/DFS)
     # ------------------------------------------------------------------
     def _same_color_neighbors(self, x, y, color):
-        """返回 (x,y) 的四连通同色邻居(上下左右, 曼哈顿距离 1)。"""
+        """返回 (x,y) 的八连通同色邻居(上下左右+四对角, 切比雪夫距离 1)。
+
+        ADR-0001: 连通性从四连通改为八连通(斜向相邻也算连通)。
+        """
         nbrs = []
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1),
+                       (1, 1), (1, -1), (-1, 1), (-1, -1)):
             nx, ny = x + dx, y + dy
             if 0 <= nx < self.n and 0 <= ny < self.n and self.board[nx][ny] == color:
                 nbrs.append((nx, ny))
@@ -153,34 +157,100 @@ class JordanChess:
     # ------------------------------------------------------------------
     # 闭合环路检测
     # ------------------------------------------------------------------
-    def _find_new_cycles(self, x, y, color):
-        """找出经过新落子点 (x, y) 的闭环, 每对邻居至多返回一个代表环。
+    def _find_new_cycles(self, x, y, color, max_cycles=5):
+        """找出经过新落子点 (x, y) 的闭环(环内含 ≥1 格点), 最多 max_cycles 个。
 
-        数学逻辑: 简单环 = 一条首尾相接的简单路径。新落子 v 加入后, 任何
-        "新形成"的环必然包含 v(不含 v 的环在 v 加入前已存在, 不算新环)。
-        简单环在 v 处恰好使用两条边, 因此:
-          1. 枚举 v 的两个同色邻居 u, w(至多 C(4,2)=6 对);
-          2. 在去掉 v 的同色连通图中 BFS 求 u→w 的最短简单路径;
-          3. [v] + 路径 构成一个不自交闭合环(约当曲线)。
-        当前规则下形成任何闭环即获胜, 找到任一代表环即可判定胜负;
-        BFS 天然有界(≤连通分量大小), 无指数级搜索风险。
+        ADR-0002: 闭环 = 顶点互异的八连通闭合折线(≥4 顶点, 允许自交),
+        且环内包含至少 1 个格点(单位方格/X 形内部无格点, 无效;
+        斜菱形/2×2 大方格有效)。
+
+        算法: 对每对邻居 (u,w):
+          1. BFS 最短路径(min_edges=2) → 环, 若含格点 → 有效;
+          2. 否则 DFS 枚举绕行路径, 找第一条使环内含格点的(预算保护)。
         """
         neighbors = self._same_color_neighbors(x, y, color)
         cycles = []
         seen_keys = set()
+        budget = [20000]                    # 全局 DFS 步数预算
         for u, w in combinations(neighbors, 2):
-            path = self._shortest_path(u, w, avoid=(x, y), color=color)
+            if len(cycles) >= max_cycles or budget[0] <= 0:
+                break
+            path = self._shortest_path(u, w, avoid=(x, y), color=color,
+                                       min_edges=2)
             if path is None:
                 continue
             cycle = [(x, y)] + path          # v → u → ... → w → v(闭合)
-            key = frozenset(cycle)
-            if key not in seen_keys:
-                seen_keys.add(key)
-                cycles.append(cycle)
+            if self._cycle_contains_lattice_point(cycle):
+                key = frozenset(cycle)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    cycles.append(cycle)
+                continue
+            # 最短路径的环不含格点: DFS 找能围住格点的绕行路径
+            for path2 in self._simple_paths_enclosing(
+                    u, w, avoid=(x, y), color=color, v=(x, y), budget=budget):
+                cycle2 = [(x, y)] + path2
+                key = frozenset(cycle2)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    cycles.append(cycle2)
+                if len(cycles) >= max_cycles:
+                    break
         return cycles
 
-    def _shortest_path(self, start, target, avoid, color):
-        """BFS 求 start→target 的最短简单路径(避开 avoid); 不可达返回 None。"""
+    def _simple_paths_enclosing(self, start, target, avoid, color, v, budget):
+        """DFS 枚举 start→target 简单路径(避开 avoid), 仅产出使 [v]+路径
+        环内含 ≥1 格点的路径。路径条数/长度/总预算三重保护。"""
+        results = []
+        visited = {start}
+        MAX_LEN = 14          # 环路径最长 14 边(含格点环通常 ≤8 边)
+        MAX_PATHS = 30        # 每对邻居最多检查 30 条路径
+
+        def dfs(cur, path):
+            budget[0] -= 1
+            if budget[0] <= 0 or len(results) >= MAX_PATHS:
+                return
+            if len(path) > MAX_LEN:
+                return
+            if cur == target:
+                if self._cycle_contains_lattice_point([v] + path):
+                    results.append(list(path))
+                return
+            for nb in self._same_color_neighbors(*cur, color):
+                if nb == avoid or nb in visited:
+                    continue
+                visited.add(nb)
+                path.append(nb)
+                dfs(nb, path)
+                path.pop()
+                visited.discard(nb)
+
+        dfs(start, [start])
+        return results
+
+    def _cycle_contains_lattice_point(self, cycle):
+        """环内部是否包含 ≥1 个格点(环顶点不算; 格点上有无棋子都算)。
+
+        用射线法逐点判定(约当曲线定理的离散应用): 从格点向右引射线,
+        与环边交点数为奇数 ⟹ 在环内。扫描环的包围盒。
+        """
+        on_loop = set(cycle)
+        xs = [p[0] for p in cycle]
+        ys = [p[1] for p in cycle]
+        for x in range(min(xs), max(xs) + 1):
+            for y in range(min(ys), max(ys) + 1):
+                if (x, y) in on_loop:
+                    continue
+                if self._point_in_polygon(x, y, cycle):
+                    return True
+        return False
+
+    def _shortest_path(self, start, target, avoid, color, min_edges=1):
+        """BFS 求 start→target 的最短简单路径(避开 avoid); 不可达返回 None。
+
+        min_edges >= 2 时要求路径至少 2 条边(用于排除 3 顶点三角形环):
+        start 的第一跳不得直接是 target, 强制绕行。
+        """
         parent = {start: None}
         queue = [start]
         head = 0
@@ -192,6 +262,8 @@ class JordanChess:
             for nb in self._same_color_neighbors(*cur, color):
                 if nb == avoid or nb in parent:
                     continue
+                if min_edges > 1 and cur == start and nb == target:
+                    continue               # 排除直接边, 强制 ≥2 条边
                 parent[nb] = cur
                 queue.append(nb)
         if target not in parent:

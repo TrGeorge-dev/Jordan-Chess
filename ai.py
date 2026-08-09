@@ -88,48 +88,64 @@ class LegacyJordanAI:
                     dsu.union(i, self._idx(x, y - 1))
                 if y < n - 1 and b[x][y + 1] == color:
                     dsu.union(i, self._idx(x, y + 1))
+                if x > 0 and y > 0 and b[x - 1][y - 1] == color:
+                    dsu.union(i, self._idx(x - 1, y - 1))
+                if x > 0 and y < n - 1 and b[x - 1][y + 1] == color:
+                    dsu.union(i, self._idx(x - 1, y + 1))
+                if x < n - 1 and y > 0 and b[x + 1][y - 1] == color:
+                    dsu.union(i, self._idx(x + 1, y - 1))
+                if x < n - 1 and y < n - 1 and b[x + 1][y + 1] == color:
+                    dsu.union(i, self._idx(x + 1, y + 1))
         return dsu
 
     # ------------------------------------------------------------------
     # 威胁检测
     # ------------------------------------------------------------------
-    def _threats(self, color, limit=None):
-        """返回 color 色的 T1 威胁点(落子即成环的空点)。
+    def _nbrs(self, x, y, color):
+        """八连通同色邻居(切比雪夫距离 1)。ADR-0001。"""
+        g = self.game
+        n = g.n
+        b = g.board
+        res = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < n and 0 <= ny < n and b[nx][ny] == color:
+                    res.append((nx, ny))
+        return res
 
-        判定: 空点 v 的任意两个同色邻居在同一连通分量。
+    def _bypass(self, u, w, v, color, dsu):
+        """u,w 直接相邻且同分量: 是否存在绕行的 ≥2 边连通路径(避开 v)。
+
+        直接调用引擎的 BFS(与环路检测完全一致): 第一跳不走 w, 保证路径
+        ≥2 条边; 若不存在, 唯一连通方式就是直接边(3 顶点三角形, 不算环)。
+        """
+        return self.game._shortest_path(u, w, avoid=v, color=color,
+                                        min_edges=2) is not None
+
+    def _threats(self, color, limit=None):
+        """返回 color 色的 T1 威胁点(落子即成环且环内含 ≥1 格点的空点)。
+
+        ADR-0002: 直接临时落子并调用引擎的环路检测(与引擎完全一致),
+        需要 ≥2 个同色邻居作为必要预筛。
         limit: 最多返回几个(胜负判断用, 找够即停)。
         """
         g = self.game
         n = g.n
         b = g.board
-        dsu = self._build_dsu(color)
-        idx = self._idx
         res = []
         for x in range(n):
             for y in range(n):
                 if b[x][y] != EMPTY:
                     continue
-                nbr = []
-                if x > 0 and b[x - 1][y] == color:
-                    nbr.append(idx(x - 1, y))
-                if x < n - 1 and b[x + 1][y] == color:
-                    nbr.append(idx(x + 1, y))
-                if y > 0 and b[x][y - 1] == color:
-                    nbr.append(idx(x, y - 1))
-                if y < n - 1 and b[x][y + 1] == color:
-                    nbr.append(idx(x, y + 1))
-                if len(nbr) < 2:
-                    continue
-                hit = False
-                for i in range(len(nbr) - 1):
-                    ri = dsu.find(nbr[i])
-                    for j in range(i + 1, len(nbr)):
-                        if ri == dsu.find(nbr[j]):
-                            hit = True
-                            break
-                    if hit:
-                        break
-                if hit:
+                if len(self._nbrs(x, y, color)) < 2:
+                    continue                     # 必要条件预筛
+                b[x][y] = color                 # 临时落子
+                cyc = g._find_new_cycles(x, y, color, max_cycles=1)
+                b[x][y] = EMPTY
+                if cyc:
                     res.append((x, y))
                     if limit is not None and len(res) >= limit:
                         break
@@ -156,6 +172,10 @@ class LegacyJordanAI:
                 if x < n - 1 and b[x + 1][y] == color: cnt += 1
                 if y > 0 and b[x][y - 1] == color: cnt += 1
                 if y < n - 1 and b[x][y + 1] == color: cnt += 1
+                if x > 0 and y > 0 and b[x - 1][y - 1] == color: cnt += 1
+                if x > 0 and y < n - 1 and b[x - 1][y + 1] == color: cnt += 1
+                if x < n - 1 and y > 0 and b[x + 1][y - 1] == color: cnt += 1
+                if x < n - 1 and y < n - 1 and b[x + 1][y + 1] == color: cnt += 1
                 if cnt >= 2:
                     cands.add((x, y))
         t2, forks = [], []
@@ -200,6 +220,22 @@ class LegacyJordanAI:
                     c = b[x][y + 1]
                     if c == color: nm += 1
                     elif c == opp: no += 1
+                if x > 0 and y > 0:
+                    c = b[x - 1][y - 1]
+                    if c == color: nm += 1
+                    elif c == opp: no += 1
+                if x > 0 and y < n - 1:
+                    c = b[x - 1][y + 1]
+                    if c == color: nm += 1
+                    elif c == opp: no += 1
+                if x < n - 1 and y > 0:
+                    c = b[x + 1][y - 1]
+                    if c == color: nm += 1
+                    elif c == opp: no += 1
+                if x < n - 1 and y < n - 1:
+                    c = b[x + 1][y + 1]
+                    if c == color: nm += 1
+                    elif c == opp: no += 1
                 if nm == 0 and no == 0:
                     continue
                 s = (nm * 5 + no * 3
@@ -238,6 +274,18 @@ class LegacyJordanAI:
                     pool[(x, y - 1)] = base
                 if y < n - 1 and b[x][y + 1] == EMPTY and (x, y + 1) not in pool:
                     pool[(x, y + 1)] = base
+                if x > 0 and y > 0 and b[x - 1][y - 1] == EMPTY \
+                        and (x - 1, y - 1) not in pool:
+                    pool[(x - 1, y - 1)] = base
+                if x > 0 and y < n - 1 and b[x - 1][y + 1] == EMPTY \
+                        and (x - 1, y + 1) not in pool:
+                    pool[(x - 1, y + 1)] = base
+                if x < n - 1 and y > 0 and b[x + 1][y - 1] == EMPTY \
+                        and (x + 1, y - 1) not in pool:
+                    pool[(x + 1, y - 1)] = base
+                if x < n - 1 and y < n - 1 and b[x + 1][y + 1] == EMPTY \
+                        and (x + 1, y + 1) not in pool:
+                    pool[(x + 1, y + 1)] = base
         cx = cy = (n - 1) / 2.0
         items = [(s + 20.0 * (n - abs(x - cx) - abs(y - cy))
                   + self._rng.uniform(-0.5, 0.5), (x, y))
@@ -290,12 +338,20 @@ class LegacyJordanAI:
                     if x < n - 1 and b[x + 1][y] == EMPTY: my_mob += 1
                     if y > 0 and b[x][y - 1] == EMPTY: my_mob += 1
                     if y < n - 1 and b[x][y + 1] == EMPTY: my_mob += 1
+                    if x > 0 and y > 0 and b[x - 1][y - 1] == EMPTY: my_mob += 1
+                    if x > 0 and y < n - 1 and b[x - 1][y + 1] == EMPTY: my_mob += 1
+                    if x < n - 1 and y > 0 and b[x + 1][y - 1] == EMPTY: my_mob += 1
+                    if x < n - 1 and y < n - 1 and b[x + 1][y + 1] == EMPTY: my_mob += 1
                 elif c == opp:
                     opp_cnt += 1
                     if x > 0 and b[x - 1][y] == EMPTY: opp_mob += 1
                     if x < n - 1 and b[x + 1][y] == EMPTY: opp_mob += 1
                     if y > 0 and b[x][y - 1] == EMPTY: opp_mob += 1
                     if y < n - 1 and b[x][y + 1] == EMPTY: opp_mob += 1
+                    if x > 0 and y > 0 and b[x - 1][y - 1] == EMPTY: opp_mob += 1
+                    if x > 0 and y < n - 1 and b[x - 1][y + 1] == EMPTY: opp_mob += 1
+                    if x < n - 1 and y > 0 and b[x + 1][y - 1] == EMPTY: opp_mob += 1
+                    if x < n - 1 and y < n - 1 and b[x + 1][y + 1] == EMPTY: opp_mob += 1
                 elif c == EMPTY:
                     m_roots = set()
                     o_roots = set()
@@ -332,6 +388,38 @@ class LegacyJordanAI:
                         elif cc == opp:
                             o_n += 1
                             o_roots.add(dsu_o.find(idx(x, y + 1)))
+                    if x > 0 and y > 0:
+                        cc = b[x - 1][y - 1]
+                        if cc == me:
+                            m_n += 1
+                            m_roots.add(dsu_m.find(idx(x - 1, y - 1)))
+                        elif cc == opp:
+                            o_n += 1
+                            o_roots.add(dsu_o.find(idx(x - 1, y - 1)))
+                    if x > 0 and y < n - 1:
+                        cc = b[x - 1][y + 1]
+                        if cc == me:
+                            m_n += 1
+                            m_roots.add(dsu_m.find(idx(x - 1, y + 1)))
+                        elif cc == opp:
+                            o_n += 1
+                            o_roots.add(dsu_o.find(idx(x - 1, y + 1)))
+                    if x < n - 1 and y > 0:
+                        cc = b[x + 1][y - 1]
+                        if cc == me:
+                            m_n += 1
+                            m_roots.add(dsu_m.find(idx(x + 1, y - 1)))
+                        elif cc == opp:
+                            o_n += 1
+                            o_roots.add(dsu_o.find(idx(x + 1, y - 1)))
+                    if x < n - 1 and y < n - 1:
+                        cc = b[x + 1][y + 1]
+                        if cc == me:
+                            m_n += 1
+                            m_roots.add(dsu_m.find(idx(x + 1, y + 1)))
+                        elif cc == opp:
+                            o_n += 1
+                            o_roots.add(dsu_o.find(idx(x + 1, y + 1)))
                     if m_n >= 2 and len(m_roots) < m_n:
                         return WIN               # me 有一步成环点
                     if o_n >= 2 and len(o_roots) < o_n:
@@ -591,6 +679,14 @@ class ThreatJordanAI(LegacyJordanAI):
                     roots.append(dsu.find(idx(x, y - 1)))
                 if y < n - 1 and b[x][y + 1] == color:
                     roots.append(dsu.find(idx(x, y + 1)))
+                if x > 0 and y > 0 and b[x - 1][y - 1] == color:
+                    roots.append(dsu.find(idx(x - 1, y - 1)))
+                if x > 0 and y < n - 1 and b[x - 1][y + 1] == color:
+                    roots.append(dsu.find(idx(x - 1, y + 1)))
+                if x < n - 1 and y > 0 and b[x + 1][y - 1] == color:
+                    roots.append(dsu.find(idx(x + 1, y - 1)))
+                if x < n - 1 and y < n - 1 and b[x + 1][y + 1] == color:
+                    roots.append(dsu.find(idx(x + 1, y + 1)))
                 unique = frozenset(roots)
                 move_roots[(x, y)] = unique
                 if len(unique) < len(roots):
@@ -1065,6 +1161,14 @@ class HybridJordanAI(LegacyJordanAI):
                     neighbors.append(idx(x, y - 1))
                 if y < n - 1 and b[x][y + 1] == color:
                     neighbors.append(idx(x, y + 1))
+                if x > 0 and y > 0 and b[x - 1][y - 1] == color:
+                    neighbors.append(idx(x - 1, y - 1))
+                if x > 0 and y < n - 1 and b[x - 1][y + 1] == color:
+                    neighbors.append(idx(x - 1, y + 1))
+                if x < n - 1 and y > 0 and b[x + 1][y - 1] == color:
+                    neighbors.append(idx(x + 1, y - 1))
+                if x < n - 1 and y < n - 1 and b[x + 1][y + 1] == color:
+                    neighbors.append(idx(x + 1, y + 1))
                 if len(neighbors) < 2:
                     continue
                 hit = False
@@ -1099,6 +1203,10 @@ class HybridJordanAI(LegacyJordanAI):
                 if x < n - 1 and b[x + 1][y] == color: count += 1
                 if y > 0 and b[x][y - 1] == color: count += 1
                 if y < n - 1 and b[x][y + 1] == color: count += 1
+                if x > 0 and y > 0 and b[x - 1][y - 1] == color: count += 1
+                if x > 0 and y < n - 1 and b[x - 1][y + 1] == color: count += 1
+                if x < n - 1 and y > 0 and b[x + 1][y - 1] == color: count += 1
+                if x < n - 1 and y < n - 1 and b[x + 1][y + 1] == color: count += 1
                 if count >= 1:
                     candidates.append((x, y))
 
@@ -1144,6 +1252,22 @@ class HybridJordanAI(LegacyJordanAI):
                     elif c == opp: theirs += 1
                 if y < n - 1:
                     c = b[x][y + 1]
+                    if c == color: mine += 1
+                    elif c == opp: theirs += 1
+                if x > 0 and y > 0:
+                    c = b[x - 1][y - 1]
+                    if c == color: mine += 1
+                    elif c == opp: theirs += 1
+                if x > 0 and y < n - 1:
+                    c = b[x - 1][y + 1]
+                    if c == color: mine += 1
+                    elif c == opp: theirs += 1
+                if x < n - 1 and y > 0:
+                    c = b[x + 1][y - 1]
+                    if c == color: mine += 1
+                    elif c == opp: theirs += 1
+                if x < n - 1 and y < n - 1:
+                    c = b[x + 1][y + 1]
                     if c == color: mine += 1
                     elif c == opp: theirs += 1
                 if mine == 0 and theirs == 0:

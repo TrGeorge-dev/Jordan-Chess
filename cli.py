@@ -101,9 +101,9 @@ def main(argv):
         ai = None
 
     print('=' * 56)
-    print('约当棋 (Jordan Chess) —— 基于约当曲线定理的双人零和棋')
+    print('约当棋 (Jordan Chess) —— 基于八连通闭环的双人零和棋')
     print(f'棋盘 {game.size}×{game.size} 方格 → {game.n}×{game.n} 格点; '
-          '黑方先手, 形成任何闭环即获胜')
+          '黑方先手, 形成含格点闭环(斜向连通)即获胜')
     print('输入 "x y" 落子; a 人机/双人; a b/a w 执黑/执白; u 悔棋; '
           'n 新局(n 13 = 13×13); h 帮助; q 退出')
     print('=' * 56)

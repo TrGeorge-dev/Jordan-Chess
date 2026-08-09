@@ -49,7 +49,7 @@
 </head>
 <body>
 <h1>约当棋</h1>
-<div class="sub">Jordan Chess · 基于约当曲线定理的双人零和棋</div>
+<div class="sub">Jordan Chess · 基于八连通闭环的双人零和棋</div>
 <div class="legend">
   <span>● 黑方</span><span>○ 白方</span>
   <span><span style="color:#d32f2f">▽</span> 闭环</span>
@@ -68,8 +68,8 @@
   <button id="side" class="aibtn" style="display:none">执黑</button>
 </div>
 <details>
-  <summary>规则（约当曲线定理）</summary>
-  <p>N×N 方格 → (N+1)×(N+1) 格点（默认 10×10，可在上方自定义 2~30）。黑先白后，轮流在空白格点放一枚己方棋子。同色棋子上下左右相邻视为连通（斜向不连通）。落子使己方棋子形成任意<strong>不自交闭合路径</strong>（约当曲线）即立即获胜——无论环内有无对方棋子。若棋盘下满且从未成环则为平局；棋子不可移动。点「人机」可与 AI 对战；点「AI-AI」可观看两个 V3 AI 自动对弈，再点一次即可暂停。</p>
+  <summary>规则（八连通 + 环内含格点）</summary>
+  <p>N×N 方格 → (N+1)×(N+1) 格点（默认 10×10，可在上方自定义 2~30）。黑先白后，轮流在空白格点放一枚己方棋子。<strong>同色棋子上下左右及斜对角相邻均视为连通</strong>（八连通）。落子使己方棋子形成<strong>闭合折线</strong>（顶点互异、相邻点八连通、至少 4 个顶点、允许斜边交叉），<strong>且环内包含至少 1 个格点</strong>（4 子方格/X 形内部无格点，无效；斜菱形 4 子即有效）→ 立即获胜。若棋盘下满且从未成环则为平局；棋子不可移动。点「人机」可与 AI 对战；点「AI-AI」可观看两个 V3 AI 自动对弈，再点一次即可暂停。</p>
 </details>
 
 <script>
@@ -131,6 +131,10 @@ class JordanChess {
     if (x < this.n-1 && this.board[x+1][y] === color) out.push([x+1, y]);
     if (y > 0 && this.board[x][y-1] === color) out.push([x, y-1]);
     if (y < this.n-1 && this.board[x][y+1] === color) out.push([x, y+1]);
+    if (x > 0 && y > 0 && this.board[x-1][y-1] === color) out.push([x-1, y-1]);
+    if (x > 0 && y < this.n-1 && this.board[x-1][y+1] === color) out.push([x-1, y+1]);
+    if (x < this.n-1 && y > 0 && this.board[x+1][y-1] === color) out.push([x+1, y-1]);
+    if (x < this.n-1 && y < this.n-1 && this.board[x+1][y+1] === color) out.push([x+1, y+1]);
     return out;
   }
   _component(start, avoid, color) {
@@ -147,22 +151,39 @@ class JordanChess {
     }
     return seen;
   }
-  _findNewCycles(x, y, color) {
+  _findNewCycles(x, y, color, maxCycles) {
     const nbrs = this._sameColorNeighbors(x, y, color);
     const cycles = [];
     const seenKeys = new Set();
     for (let i = 0; i < nbrs.length; i++)
       for (let j = i+1; j < nbrs.length; j++) {
-        const path = this._shortestPath(nbrs[i], nbrs[j], [x,y], color);
+        // minEdges=2: 环至少 4 顶点(排除 3 顶点三角形, ADR-0001)
+        const path = this._shortestPath(nbrs[i], nbrs[j], [x,y], color, 2);
         if (path === null) continue;
         const cycle = [[x,y]].concat(path);
+        // ADR-0002: 环内必须 ≥1 格点(排除单位方格/X形)
+        if (!this._cycleContainsLatticePoint(cycle)) continue;
         const key = cycle.map(p=>p[0]+","+p[1]).sort().join("|");
         if (!seenKeys.has(key)) { seenKeys.add(key); cycles.push(cycle); }
+        if (maxCycles !== undefined && cycles.length >= maxCycles) return cycles;
       }
     return cycles;
   }
-  _shortestPath(start, target, avoid, color) {
+  _cycleContainsLatticePoint(cycle) {
+    // 射线法: 环内部是否含 ≥1 个格点(顶点不算, 有无棋子都算)。ADR-0002
+    const onLoop = new Set(cycle.map(p=>p[0]+","+p[1]));
+    let x0=99,x1=-1,y0=99,y1=-1;
+    for (const [x,y] of cycle) { x0=Math.min(x0,x); x1=Math.max(x1,x); y0=Math.min(y0,y); y1=Math.max(y1,y); }
+    for (let x=x0; x<=x1; x++)
+      for (let y=y0; y<=y1; y++) {
+        if (onLoop.has(x+","+y)) continue;
+        if (JordanChess.pointInPolygon(x, y, cycle)) return true;
+      }
+    return false;
+  }
+  _shortestPath(start, target, avoid, color, minEdges=1) {
     // BFS 求 start→target 最短简单路径(避开 avoid); 不可达返回 null
+    // minEdges>=2: 第一跳不走 target(强制 ≥2 条边)
     const parent = new Map([[start[0]+","+start[1], null]]);
     const queue = [start];
     let head = 0;
@@ -172,6 +193,8 @@ class JordanChess {
       for (const nb of this._sameColorNeighbors(cur[0], cur[1], color)) {
         const k = nb[0]+","+nb[1];
         if ((nb[0]===avoid[0]&&nb[1]===avoid[1]) || parent.has(k)) continue;
+        if (minEdges > 1 && cur[0]===start[0] && cur[1]===start[1] &&
+            nb[0]===target[0] && nb[1]===target[1]) continue;
         parent.set(k, cur);
         queue.push(nb);
       }
@@ -240,6 +263,10 @@ class LegacyJordanAI {
         if (x < n-1 && b[x+1][y] === color) dsu.union(i, this._idx(x+1, y));
         if (y > 0 && b[x][y-1] === color) dsu.union(i, this._idx(x, y-1));
         if (y < n-1 && b[x][y+1] === color) dsu.union(i, this._idx(x, y+1));
+        if (x > 0 && y > 0 && b[x-1][y-1] === color) dsu.union(i, this._idx(x-1, y-1));
+        if (x > 0 && y < n-1 && b[x-1][y+1] === color) dsu.union(i, this._idx(x-1, y+1));
+        if (x < n-1 && y > 0 && b[x+1][y-1] === color) dsu.union(i, this._idx(x+1, y-1));
+        if (x < n-1 && y < n-1 && b[x+1][y+1] === color) dsu.union(i, this._idx(x+1, y+1));
       }
     return dsu;
   }
@@ -255,14 +282,16 @@ class LegacyJordanAI {
         if (x < n-1 && b[x+1][y] === color) nbr.push(this._idx(x+1, y));
         if (y > 0 && b[x][y-1] === color) nbr.push(this._idx(x, y-1));
         if (y < n-1 && b[x][y+1] === color) nbr.push(this._idx(x, y+1));
+        if (x > 0 && y > 0 && b[x-1][y-1] === color) nbr.push(this._idx(x-1, y-1));
+        if (x > 0 && y < n-1 && b[x-1][y+1] === color) nbr.push(this._idx(x-1, y+1));
+        if (x < n-1 && y > 0 && b[x+1][y-1] === color) nbr.push(this._idx(x+1, y-1));
+        if (x < n-1 && y < n-1 && b[x+1][y+1] === color) nbr.push(this._idx(x+1, y+1));
         if (nbr.length < 2) continue;
-        let hit = false;
-        for (let i = 0; i < nbr.length - 1 && !hit; i++) {
-          const ri = dsu.find(nbr[i]);
-          for (let j = i+1; j < nbr.length; j++)
-            if (ri === dsu.find(nbr[j])) { hit = true; break; }
-        }
-        if (hit) {
+        // ADR-0002: 临时落子调引擎环路检测(与引擎完全一致, 环内含格点)
+        b[x][y] = color;
+        const cyc = this.game._findNewCycles(x, y, color, 1);
+        b[x][y] = EMPTY;
+        if (cyc.length) {
           res.push([x, y]);
           if (limit !== undefined && res.length >= limit) return res;
         }
@@ -280,6 +309,10 @@ class LegacyJordanAI {
         if (x < n-1 && b[x+1][y] === color) cnt++;
         if (y > 0 && b[x][y-1] === color) cnt++;
         if (y < n-1 && b[x][y+1] === color) cnt++;
+        if (x > 0 && y > 0 && b[x-1][y-1] === color) cnt++;
+        if (x > 0 && y < n-1 && b[x-1][y+1] === color) cnt++;
+        if (x < n-1 && y > 0 && b[x+1][y-1] === color) cnt++;
+        if (x < n-1 && y < n-1 && b[x+1][y+1] === color) cnt++;
         if (cnt >= 2) cands.add(x + "," + y);
       }
     const t2 = [], forks = [];
@@ -334,6 +367,10 @@ class LegacyJordanAI {
         if (x < n-1 && b[x+1][y] === EMPTY) setp([x+1, y], base);
         if (y > 0 && b[x][y-1] === EMPTY) setp([x, y-1], base);
         if (y < n-1 && b[x][y+1] === EMPTY) setp([x, y+1], base);
+        if (x > 0 && y > 0 && b[x-1][y-1] === EMPTY) setp([x-1, y-1], base);
+        if (x > 0 && y < n-1 && b[x-1][y+1] === EMPTY) setp([x-1, y+1], base);
+        if (x < n-1 && y > 0 && b[x+1][y-1] === EMPTY) setp([x+1, y-1], base);
+        if (x < n-1 && y < n-1 && b[x+1][y+1] === EMPTY) setp([x+1, y+1], base);
       }
     const cx = (n-1)/2, cy = (n-1)/2;
     const items = [];
@@ -360,12 +397,20 @@ class LegacyJordanAI {
           if (x < n-1 && b[x+1][y] === EMPTY) myMob++;
           if (y > 0 && b[x][y-1] === EMPTY) myMob++;
           if (y < n-1 && b[x][y+1] === EMPTY) myMob++;
+          if (x > 0 && y > 0 && b[x-1][y-1] === EMPTY) myMob++;
+          if (x > 0 && y < n-1 && b[x-1][y+1] === EMPTY) myMob++;
+          if (x < n-1 && y > 0 && b[x+1][y-1] === EMPTY) myMob++;
+          if (x < n-1 && y < n-1 && b[x+1][y+1] === EMPTY) myMob++;
         } else if (c === opp) {
           oppCnt++;
           if (x > 0 && b[x-1][y] === EMPTY) oppMob++;
           if (x < n-1 && b[x+1][y] === EMPTY) oppMob++;
           if (y > 0 && b[x][y-1] === EMPTY) oppMob++;
           if (y < n-1 && b[x][y+1] === EMPTY) oppMob++;
+          if (x > 0 && y > 0 && b[x-1][y-1] === EMPTY) oppMob++;
+          if (x > 0 && y < n-1 && b[x-1][y+1] === EMPTY) oppMob++;
+          if (x < n-1 && y > 0 && b[x+1][y-1] === EMPTY) oppMob++;
+          if (x < n-1 && y < n-1 && b[x+1][y+1] === EMPTY) oppMob++;
         } else {
           const mRoots = new Set(), oRoots = new Set();
           let mN = 0, oN = 0;
@@ -519,6 +564,10 @@ class HybridJordanAI extends LegacyJordanAI {
         if (x < n-1 && b[x+1][y] === color) count++;
         if (y > 0 && b[x][y-1] === color) count++;
         if (y < n-1 && b[x][y+1] === color) count++;
+        if (x > 0 && y > 0 && b[x-1][y-1] === color) count++;
+        if (x > 0 && y < n-1 && b[x-1][y+1] === color) count++;
+        if (x < n-1 && y > 0 && b[x+1][y-1] === color) count++;
+        if (x < n-1 && y < n-1 && b[x+1][y+1] === color) count++;
         if (count >= 1) cands.push([x, y]);
       }
     const t2 = [], forks = [];
@@ -806,6 +855,10 @@ class SearchStateV3 {
     if (x+1<this.n) out.push(index+this.n);
     if (y>0) out.push(index-1);
     if (y+1<this.n) out.push(index+1);
+    if (x>0 && y>0) out.push(index-this.n-1);
+    if (x>0 && y+1<this.n) out.push(index-this.n+1);
+    if (x+1<this.n && y>0) out.push(index+this.n-1);
+    if (x+1<this.n && y+1<this.n) out.push(index+this.n+1);
     return out;
   }
   _makeZobrist() {
@@ -827,11 +880,8 @@ class SearchStateV3 {
     }
     for (let i=0;i<this.count;i++) {
       const color=this.board[i]; if (color===EMPTY) continue;
-      const x=Math.floor(i/this.n), y=i%this.n;
-      if (x+1<this.n && this.board[i+this.n]===color)
-        this.dsu[color].union(i,i+this.n);
-      if (y+1<this.n && this.board[i+1]===color)
-        this.dsu[color].union(i,i+1);
+      for (const nb of this.neighbors[i])
+        if (this.board[nb]===color) this.dsu[color].union(i,nb);
     }
     this.dsu[BLACK].clearHistory(); this.dsu[WHITE].clearHistory();
   }
@@ -843,10 +893,103 @@ class SearchStateV3 {
       if (this.board[nb]===color) roots.push(dsu.find(nb));
     return roots;
   }
+  connectedBy2Edges(u,w,color) {
+    const dsu=this.dsu[color];
+    if (dsu.find(u)!==dsu.find(w)) return false;
+    const ux=u%this.n, uy=Math.floor(u/this.n), wx=w%this.n, wy=Math.floor(w/this.n);
+    if (Math.max(Math.abs(ux-wx),Math.abs(uy-wy))>=2) return true;
+    // 直接相邻: BFS 找 ≥2 边路径(第一跳不走 w), 排除 3 顶点三角形(ADR-0001)
+    const visited=new Set([u]);
+    let layer=[];
+    for (const nb of this.neighbors[u])
+      if (nb!==w && this.board[nb]===color) { visited.add(nb); layer.push(nb); }
+    while (layer.length) {
+      const nxt=[];
+      for (const cur of layer) {
+        if (cur===w) return true;
+        for (const nb of this.neighbors[cur])
+          if (this.board[nb]===color && !visited.has(nb)) { visited.add(nb); nxt.push(nb); }
+      }
+      layer=nxt;
+    }
+    return visited.has(w);
+  }
+  // ADR-0002: 射线法(半开区间), 供环内格点判定
+  static pointInPolygon(px,py,poly) {
+    let inside=false;
+    const m=poly.length;
+    for (let i=0;i<m;i++) {
+      const [x1,y1]=poly[i], [x2,y2]=poly[(i+1)%m];
+      if ((y1>py)!==(y2>py)) {
+        const xi=x1+(py-y1)*(x2-x1)/(y2-y1);
+        if (xi>px) inside=!inside;
+      }
+    }
+    return inside;
+  }
+  // ADR-0002: 环(索引序列)内部是否含 ≥1 格点
+  cycleContainsLatticePoint(cycleIdx) {
+    const pts=cycleIdx.map(i=>[Math.floor(i/this.n),i%this.n]);
+    const onLoop=new Set(pts.map(p=>p[0]+","+p[1]));
+    let x0=99,x1=-1,y0=99,y1=-1;
+    for (const [x,y] of pts) { x0=Math.min(x0,x); x1=Math.max(x1,x); y0=Math.min(y0,y); y1=Math.max(y1,y); }
+    for (let x=x0;x<=x1;x++)
+      for (let y=y0;y<=y1;y++) {
+        if (onLoop.has(x+","+y)) continue;
+        if (SearchStateV3.pointInPolygon(x,y,pts)) return true;
+      }
+    return false;
+  }
+  bfsPath(start,target,avoid,color,minEdges=1) {
+    const parent=new Map([[start,null]]);
+    const queue=[start]; let head=0;
+    while (head<queue.length) {
+      const cur=queue[head++];
+      if (cur===target) break;
+      for (const nb of this.neighbors[cur]) {
+        if (nb===avoid || parent.has(nb)) continue;
+        if (minEdges>1 && cur===start && nb===target) continue;
+        parent.set(nb,cur); queue.push(nb);
+      }
+    }
+    if (!parent.has(target)) return null;
+    const path=[]; let cur=target;
+    while (cur!==null) { path.push(cur); cur=parent.get(cur); }
+    path.reverse(); return path;
+  }
+  // ADR-0002: 是否存在经过 move 的闭环且环内 ≥1 格点
+  enclosingCycleExists(move,color,budget=800) {
+    const nbrs=[];
+    for (const nb of this.neighbors[move])
+      if (this.board[nb]===color) nbrs.push(nb);
+    let steps=budget;
+    const ok=(path)=>{ const cycle=[move].concat(path); return this.cycleContainsLatticePoint(cycle); };
+    for (let i=0;i<nbrs.length;i++)
+      for (let j=i+1;j<nbrs.length;j++) {
+        const u=nbrs[i], w=nbrs[j];
+        if (!this.connectedBy2Edges(u,w,color)) continue;
+        const path=this.bfsPath(u,w,move,color,2);
+        if (path!==null && ok(path)) return true;
+        // DFS 补找绕行路径
+        const visited=new Set([u]);
+        const dfs=(cur,p)=>{
+          if (steps--<=0 || p.length>14) return;
+          if (cur===w) { if (ok(p)) throw null; return; }
+          for (const nb of this.neighbors[cur]) {
+            if (nb===move || visited.has(nb)) continue;
+            if (this.board[nb]!==color) continue;
+            visited.add(nb); p.push(nb);
+            dfs(nb,p);
+            p.pop(); visited.delete(nb);
+          }
+        };
+        try { dfs(u,[u]); } catch(e) { return true; }
+      }
+    return false;
+  }
   isWinningMove(move,color) {
     if (this.board[move]!==EMPTY) return false;
-    const roots=this.sameColorRoots(move,color);
-    return roots.length!==new Set(roots).size;
+    return this.enclosingCycleExists(move,color);
   }
   winningMoves(color,limit=null) {
     const out=[];
@@ -860,8 +1003,7 @@ class SearchStateV3 {
   play(move,color) {
     if (this.board[move]!==EMPTY) throw new Error("occupied V3 move");
     const dsu=this.dsu[color], snapshot=dsu.snapshot();
-    const roots=this.sameColorRoots(move,color);
-    const won=roots.length!==new Set(roots).size;
+    const won=this.isWinningMove(move,color);
     this.board[move]=color; this.emptyCount--;
     this.hash^=this.zobrist[move][color-1]; dsu.activate(move);
     for (const nb of this.neighbors[move])
@@ -917,12 +1059,17 @@ class JordanAI {
     const threats=[], moveRoots=new Map(), frontiers=new Map();
     for (let move=0;move<this.state.count;move++) {
       if (this.state.board[move]!==EMPTY) continue;
-      const roots=[];
+      this._checkTime();               // 预算检查: 防止分析拖垮搜索
+      const nbrs=[];
       for (const nb of this.state.neighbors[move])
-        if (this.state.board[nb]===color) roots.push(dsu.find(nb));
+        if (this.state.board[nb]===color) nbrs.push(nb);
+      const roots=nbrs.map(nb=>dsu.find(nb));
       const unique=[...new Set(roots)].sort((a,b)=>a-b);
       moveRoots.set(move,unique);
-      if (unique.length<roots.length) threats.push(move);
+      // ADR-0002: 威胁 = 落子后存在含格点环
+      if (nbrs.length>=2 && this.state.enclosingCycleExists(move,color)) {
+        threats.push(move);
+      }
       for (const root of unique) {
         if (!frontiers.has(root)) frontiers.set(root,new Set());
         frontiers.get(root).add(move);
