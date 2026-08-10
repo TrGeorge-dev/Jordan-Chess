@@ -151,23 +151,61 @@ class JordanChess {
     }
     return seen;
   }
-  _findNewCycles(x, y, color, maxCycles) {
+  _findNewCycles(x, y, color, maxCycles = 5) {
     const nbrs = this._sameColorNeighbors(x, y, color);
     const cycles = [];
     const seenKeys = new Set();
+    const budget = {v: 20000};
     for (let i = 0; i < nbrs.length; i++)
       for (let j = i+1; j < nbrs.length; j++) {
+        if (maxCycles !== undefined && cycles.length >= maxCycles) break;
         // minEdges=2: 环至少 4 顶点(排除 3 顶点三角形, ADR-0001)
         const path = this._shortestPath(nbrs[i], nbrs[j], [x,y], color, 2);
         if (path === null) continue;
         const cycle = [[x,y]].concat(path);
-        // ADR-0002: 环内必须 ≥1 格点(排除单位方格/X形)
-        if (!this._cycleContainsLatticePoint(cycle)) continue;
-        const key = cycle.map(p=>p[0]+","+p[1]).sort().join("|");
-        if (!seenKeys.has(key)) { seenKeys.add(key); cycles.push(cycle); }
-        if (maxCycles !== undefined && cycles.length >= maxCycles) return cycles;
+        if (this._cycleContainsLatticePoint(cycle)) {
+          // ADR-0002: 环内 ≥1 格点(排除单位方格/X形)
+          const key = cycle.map(p=>p[0]+","+p[1]).sort().join("|");
+          if (!seenKeys.has(key)) { seenKeys.add(key); cycles.push(cycle); }
+          if (maxCycles !== undefined && cycles.length >= maxCycles) return cycles;
+          continue;
+        }
+        // BFS 最短路径环无格点: DFS 补找绕行路径(与 Python 引擎一致)
+        for (const p2 of this._simplePathsEnclosing(nbrs[i], nbrs[j], [x,y], color, budget)) {
+          const cycle2 = [[x,y]].concat(p2);
+          const key2 = cycle2.map(p=>p[0]+","+p[1]).sort().join("|");
+          if (!seenKeys.has(key2)) { seenKeys.add(key2); cycles.push(cycle2); }
+          if (maxCycles !== undefined && cycles.length >= maxCycles) return cycles;
+        }
       }
     return cycles;
+  }
+  _simplePathsEnclosing(u, w, v, color, budget) {
+    // DFS 枚举 u→w 简单路径(避开 v), 仅产出使 [v]+路径 环内含 ≥1 格点的路径
+    const results = [];
+    const visited = new Set([u[0]+","+u[1]]);
+    const MAX_LEN = 14, MAX_PATHS = 30;
+    const dfs = (cur, path) => {
+      budget.v -= 1;
+      if (budget.v <= 0 || results.length >= MAX_PATHS) return;
+      if (path.length > MAX_LEN) return;
+      if (cur[0]===w[0] && cur[1]===w[1]) {
+        const cycle = [v].concat(path);
+        if (this._cycleContainsLatticePoint(cycle)) results.push(path.slice());
+        return;
+      }
+      for (const nb of this._sameColorNeighbors(cur[0], cur[1], color)) {
+        const k = nb[0]+","+nb[1];
+        if ((nb[0]===v[0]&&nb[1]===v[1]) || visited.has(k)) continue;
+        visited.add(k);
+        path.push(nb);
+        dfs(nb, path);
+        path.pop();
+        visited.delete(k);
+      }
+    };
+    dfs(u, [u]);
+    return results;
   }
   _cycleContainsLatticePoint(cycle) {
     // 射线法: 环内部是否含 ≥1 个格点(顶点不算, 有无棋子都算)。ADR-0002
